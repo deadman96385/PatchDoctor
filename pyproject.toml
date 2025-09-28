@@ -1,0 +1,72 @@
+[project]
+name = "patchdoctor"
+version = "1.0.0"
+description = "Professional Git patch verification and analysis tool"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "deadman96385", email = "seanhoyt963@gmail.com"},
+]
+dependencies = [
+    "rich>=13.7.0,<15.0.0",
+    "chardet>=5.0.0,<6.0.0",
+    "cachetools>=5.0.0,<6.0.0",
+]
+
+[project.scripts]
+patchdoctor = "patchdoctor:main"
+
+[tool.uv]
+dev-dependencies = [
+    "black>=23.12.0,<24.0.0",
+    "mypy>=1.7.1,<2.0.0",
+    "ruff>=0.1.8,<1.0.0",
+    "pylint>=3.0.0,<4.0.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+]
+testpaths = ["tests"]
+
+[tool.pylint.main]
+# Disable warnings that are acceptable for this codebase
+disable = [
+    "C0301",  # line-too-long (mostly docstrings and long strings)
+    "C0302",  # too-many-lines (large but cohesive module)
+    "C0325",  # unnecessary-parens (style preference)
+    "C0415",  # import-outside-toplevel (compatibility requirement)
+    "R0902",  # too-many-instance-attributes (dataclasses need many fields)
+    "R0903",  # too-few-public-methods (utility classes)
+    "R0911",  # too-many-return-statements (validation methods)
+    "R0912",  # too-many-branches (complex parsing logic)
+    "R0913",  # too-many-arguments (configuration methods)
+    "R0914",  # too-many-locals (parsing algorithms)
+    "R0915",  # too-many-statements (comprehensive validation)
+    "R0916",  # too-many-boolean-expressions (complex conditions)
+    "R0917",  # too-many-positional-arguments (config methods)
+    "R1702",  # too-many-nested-blocks (parsing complexity)
+    "R1705",  # no-else-return (style preference)
+    "R1714",  # consider-using-in (readability preference)
+    "W0107",  # unnecessary-pass (required for empty classes)
+    "W0603",  # global-statement (controlled config override)
+    "W0612",  # unused-variable (false positives in complex logic)
+    "W0613",  # unused-argument (API compatibility)
+    "W0718",  # broad-exception-caught (necessary for robustness)
+    "W0707",  # raise-missing-from (handled appropriately)
+]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint.reports]
+score = false  # Don't show score since we're disabling many rules
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,0 +1,10 @@
+*log*
+*tmp*
+*__pycache__*
+.idea/
+venv/
+*.session*
+.env
+.claude/
+/test_*.py
+.coverage
