@@ -62,6 +62,7 @@ import shutil
 import subprocess
 import sys
 import json
+import time
 
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -2829,6 +2830,476 @@ def validate_incremental(
         "early_stopped": should_stop.is_set(),
         "summary": f"Processed {processed_count}/{total_count} patches: {fully_applied} fully applied, {partially_applied} partial, {not_applied} not applied, {len(errors)} errors"
     }
+
+
+# ===== AI AGENT INTEGRATION: Batch Patch Processing Utilities =====
+
+def validate_patch_sequence(
+    patch_files: List[str],
+    dependency_order: bool = True,
+    rollback_on_failure: bool = False,
+    checkpoint_frequency: int = 5,
+    **kwargs
+) -> Dict[str, Any]:
+    """Validate a sequence of patches with dependency tracking.
+
+    Args:
+        patch_files: List of patch file paths in desired order
+        dependency_order: If True, analyze and reorder patches by dependencies
+        rollback_on_failure: If True, rollback all changes on any failure
+        checkpoint_frequency: Create rollback points every N patches
+        **kwargs: Additional arguments passed to validation
+
+    Returns:
+        Dict with sequence validation results and dependency analysis
+    """
+    import tempfile
+    import shutil
+
+    if not patch_files:
+        error_info = ErrorInfo(
+            code=ERROR_NO_PATCHES_FOUND,
+            message="No patch files provided for sequence validation",
+            suggestion="Provide a list of patch file paths to validate",
+            context={"provided_count": 0},
+            recoverable=False,
+            severity="error"
+        )
+        return {
+            "success": False,
+            "error": "No patch files provided",
+            "error_info": asdict(error_info),
+            "sequence_results": []
+        }
+
+    # Analyze dependencies if requested
+    dependencies = {}
+    application_plan = patch_files.copy()
+
+    if dependency_order:
+        dependency_analysis = _analyze_patch_file_dependencies(patch_files)
+        dependencies = dependency_analysis["dependencies"]
+        application_plan = _create_dependency_order(patch_files, dependencies)
+
+    # Set up rollback tracking
+    rollback_info = {
+        "checkpoints": [],
+        "git_stash_ids": [],
+        "original_state": None
+    }
+
+    # Create GitRunner for rollback operations
+    repo_path = kwargs.get("repo_path", ".")
+    git_runner = GitRunner(repo_path=repo_path)
+
+    # Capture initial state
+    if rollback_on_failure:
+        initial_state = git_runner.run_git_command(["status", "--porcelain"])
+        rollback_info["original_state"] = initial_state.stdout if initial_state.ok else None
+
+    # Process patches in dependency order
+    sequence_results = []
+    processed_count = 0
+    checkpoint_count = 0
+
+    try:
+        for i, patch_file in enumerate(application_plan):
+            # Create checkpoint if needed
+            if rollback_on_failure and i > 0 and i % checkpoint_frequency == 0:
+                checkpoint_result = _create_rollback_checkpoint(git_runner, checkpoint_count)
+                if checkpoint_result["success"]:
+                    rollback_info["checkpoints"].append(checkpoint_result)
+                    checkpoint_count += 1
+
+            # Validate single patch
+            try:
+                if patch_file.endswith('.patch'):
+                    # Parse as patch file
+                    with open(patch_file, 'r', encoding='utf-8') as f:
+                        patch_content = f.read()
+                    result = validate_from_content(patch_content, **kwargs)
+                else:
+                    # Assume it's a patch directory
+                    result = run_validation(patch_dir=patch_file, **kwargs)
+
+                # Track result
+                patch_result = {
+                    "patch_file": patch_file,
+                    "sequence_index": i,
+                    "original_index": patch_files.index(patch_file),
+                    "result": result,
+                    "dependencies": dependencies.get(Path(patch_file).name, [])
+                }
+
+                sequence_results.append(patch_result)
+                processed_count += 1
+
+                # Check for failure and handle rollback
+                if not result.get("success", False) and rollback_on_failure:
+                    # Rollback on failure
+                    rollback_result = _rollback_to_checkpoint(git_runner, rollback_info, checkpoint_count - 1)
+                    return {
+                        "success": False,
+                        "error": f"Patch sequence failed at {patch_file}",
+                        "processed_count": processed_count,
+                        "total_count": len(application_plan),
+                        "sequence_results": sequence_results,
+                        "dependencies": dependencies,
+                        "application_plan": application_plan,
+                        "rollback_performed": True,
+                        "rollback_result": rollback_result
+                    }
+
+            except Exception as e:
+                error_result = {
+                    "patch_file": patch_file,
+                    "sequence_index": i,
+                    "error": str(e),
+                    "error_info": asdict(ErrorInfo(
+                        code=ERROR_PARSE_ERROR,
+                        message=f"Failed to process patch in sequence: {e}",
+                        suggestion="Check patch file format and accessibility",
+                        context={"patch_file": patch_file, "sequence_index": i},
+                        recoverable=not rollback_on_failure,
+                        severity="error"
+                    ))
+                }
+
+                sequence_results.append(error_result)
+
+                if rollback_on_failure:
+                    rollback_result = _rollback_to_checkpoint(git_runner, rollback_info, checkpoint_count - 1)
+                    return {
+                        "success": False,
+                        "error": f"Exception during patch sequence at {patch_file}: {e}",
+                        "processed_count": processed_count,
+                        "total_count": len(application_plan),
+                        "sequence_results": sequence_results,
+                        "rollback_performed": True,
+                        "rollback_result": rollback_result
+                    }
+
+        # Calculate final statistics
+        successful_patches = sum(1 for r in sequence_results if r.get("result", {}).get("success", False))
+        success_rate = (successful_patches / len(sequence_results)) * 100 if sequence_results else 0
+
+        return {
+            "success": successful_patches == len(sequence_results),
+            "processed_count": processed_count,
+            "total_count": len(application_plan),
+            "success_rate": success_rate,
+            "sequence_results": sequence_results,
+            "dependencies": dependencies,
+            "application_plan": application_plan,
+            "rollback_performed": False,
+            "rollback_info": rollback_info
+        }
+
+    except Exception as e:
+        # Handle unexpected exceptions
+        if rollback_on_failure:
+            rollback_result = _rollback_to_checkpoint(git_runner, rollback_info, 0)
+            return {
+                "success": False,
+                "error": f"Unexpected error during patch sequence: {e}",
+                "processed_count": processed_count,
+                "total_count": len(application_plan),
+                "sequence_results": sequence_results,
+                "rollback_performed": True,
+                "rollback_result": rollback_result
+            }
+
+        return {
+            "success": False,
+            "error": f"Unexpected error during patch sequence: {e}",
+            "processed_count": processed_count,
+            "total_count": len(application_plan),
+            "sequence_results": sequence_results
+        }
+
+
+def create_patch_application_plan(
+    verification_results: List[VerificationResult]
+) -> Dict[str, Any]:
+    """Create a step-by-step plan for applying patches.
+
+    Args:
+        verification_results: List of verification results from patch validation
+
+    Returns:
+        Dict with application plan and analysis
+    """
+    if not verification_results:
+        return {
+            "application_order": [],
+            "dependencies": {},
+            "conflict_warnings": [],
+            "rollback_points": [],
+            "estimated_duration": 0
+        }
+
+    # Analyze patch complexity and dependencies
+    patches_info = []
+    file_to_patches = {}
+
+    for i, result in enumerate(verification_results):
+        patch_name = result.patch_info.filename
+        modified_files = set()
+
+        # Extract modified files from file results
+        for file_result in result.file_results:
+            modified_files.add(file_result.file_path)
+
+            # Track which patches modify each file
+            if file_result.file_path not in file_to_patches:
+                file_to_patches[file_result.file_path] = []
+            file_to_patches[file_result.file_path].append(patch_name)
+
+        # Estimate complexity
+        complexity_score = len(result.file_results) * 2
+        if result.overall_status == "PARTIALLY_APPLIED":
+            complexity_score += 5
+        elif result.overall_status == "NOT_APPLIED":
+            complexity_score += 10
+
+        patches_info.append({
+            "name": patch_name,
+            "index": i,
+            "modified_files": modified_files,
+            "complexity": complexity_score,
+            "status": result.overall_status,
+            "fix_count": sum(len(fr.fix_suggestions) for fr in result.file_results)
+        })
+
+    # Identify dependencies and conflicts
+    dependencies = {}
+    conflicts = []
+
+    for file_path, patch_names in file_to_patches.items():
+        if len(patch_names) > 1:
+            # Multiple patches modify same file - potential conflict
+            conflicts.append({
+                "file": file_path,
+                "patches": patch_names,
+                "severity": "high" if len(patch_names) > 2 else "medium"
+            })
+
+            # Create dependency chain for same-file patches
+            sorted_patches = sorted(patch_names)
+            for i in range(len(sorted_patches) - 1):
+                dependent = sorted_patches[i + 1]
+                dependency = sorted_patches[i]
+
+                if dependent not in dependencies:
+                    dependencies[dependent] = []
+                if dependency not in dependencies[dependent]:
+                    dependencies[dependent].append(dependency)
+
+    # Create application order using topological sort
+    application_order = _topological_sort_patches(patches_info, dependencies)
+
+    # Determine rollback points (after complex patches or before conflicts)
+    rollback_points = []
+    for i, patch_info in enumerate(application_order):
+        # Add rollback point before high-complexity patches
+        if patch_info["complexity"] > 15:
+            rollback_points.append({
+                "index": i,
+                "reason": "high_complexity",
+                "patch": patch_info["name"]
+            })
+
+        # Add rollback point before conflicting patches
+        patch_files = patch_info["modified_files"]
+        for conflict in conflicts:
+            if patch_info["name"] in conflict["patches"]:
+                rollback_points.append({
+                    "index": i,
+                    "reason": "potential_conflict",
+                    "patch": patch_info["name"],
+                    "conflict_file": conflict["file"]
+                })
+                break
+
+    # Estimate duration (simple heuristic)
+    total_complexity = sum(p["complexity"] for p in patches_info)
+    estimated_duration = max(30, total_complexity * 2)  # seconds
+
+    return {
+        "application_order": application_order,
+        "dependencies": dependencies,
+        "conflict_warnings": conflicts,
+        "rollback_points": rollback_points,
+        "estimated_duration": estimated_duration,
+        "total_patches": len(patches_info),
+        "complexity_score": total_complexity
+    }
+
+
+def _analyze_patch_file_dependencies(patch_files: List[str]) -> Dict[str, Any]:
+    """Analyze dependencies between patch files based on modified files."""
+    file_to_patches = {}
+    dependencies = {}
+
+    for patch_file in patch_files:
+        try:
+            with open(patch_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Extract modified files
+            modified_files = set()
+            for line in content.split('\n'):
+                if line.startswith('diff --git'):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        file_path = parts[2][2:]  # Remove 'a/' prefix
+                        modified_files.add(file_path)
+
+            # Track file to patch mapping
+            patch_name = Path(patch_file).name
+            for file_path in modified_files:
+                if file_path not in file_to_patches:
+                    file_to_patches[file_path] = []
+                file_to_patches[file_path].append(patch_name)
+
+        except Exception:
+            continue  # Skip problematic patches
+
+    # Build dependency relationships
+    for file_path, patches in file_to_patches.items():
+        if len(patches) > 1:
+            sorted_patches = sorted(patches)
+            for i in range(len(sorted_patches) - 1):
+                dependent = sorted_patches[i + 1]
+                dependency = sorted_patches[i]
+
+                if dependent not in dependencies:
+                    dependencies[dependent] = []
+                if dependency not in dependencies[dependent]:
+                    dependencies[dependent].append(dependency)
+
+    return {"dependencies": dependencies, "file_mappings": file_to_patches}
+
+
+def _create_dependency_order(patch_files: List[str], dependencies: Dict[str, List[str]]) -> List[str]:
+    """Create patch application order based on dependencies."""
+    patch_names = [Path(pf).name for pf in patch_files]
+    patch_file_map = {Path(pf).name: pf for pf in patch_files}
+
+    # Topological sort
+    visited = set()
+    order = []
+
+    def visit(patch_name):
+        if patch_name in visited:
+            return
+        visited.add(patch_name)
+
+        # Visit dependencies first
+        for dep in dependencies.get(patch_name, []):
+            if dep in patch_names:
+                visit(dep)
+
+        if patch_name in patch_file_map:
+            order.append(patch_file_map[patch_name])
+
+    for patch_name in patch_names:
+        visit(patch_name)
+
+    return order
+
+
+def _topological_sort_patches(patches_info: List[Dict], dependencies: Dict[str, List[str]]) -> List[Dict]:
+    """Sort patches using topological ordering based on dependencies."""
+    # Create name to info mapping
+    name_to_info = {p["name"]: p for p in patches_info}
+
+    # Topological sort
+    visited = set()
+    order = []
+
+    def visit(patch_name):
+        if patch_name in visited:
+            return
+        visited.add(patch_name)
+
+        # Visit dependencies first
+        for dep in dependencies.get(patch_name, []):
+            if dep in name_to_info:
+                visit(dep)
+
+        if patch_name in name_to_info:
+            order.append(name_to_info[patch_name])
+
+    for patch_info in patches_info:
+        visit(patch_info["name"])
+
+    return order
+
+
+def _create_rollback_checkpoint(git_runner: 'GitRunner', checkpoint_id: int) -> Dict[str, Any]:
+    """Create a rollback checkpoint using git stash."""
+    try:
+        # Create stash with descriptive message
+        stash_result = git_runner.run_git_command([
+            "stash", "push", "-m", f"PatchDoctor checkpoint {checkpoint_id}"
+        ])
+
+        if stash_result.ok:
+            return {
+                "success": True,
+                "checkpoint_id": checkpoint_id,
+                "stash_message": f"PatchDoctor checkpoint {checkpoint_id}",
+                "timestamp": time.time()
+            }
+        else:
+            return {
+                "success": False,
+                "error": stash_result.stderr,
+                "checkpoint_id": checkpoint_id
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "checkpoint_id": checkpoint_id
+        }
+
+
+def _rollback_to_checkpoint(git_runner: 'GitRunner', rollback_info: Dict, checkpoint_id: int) -> Dict[str, Any]:
+    """Rollback to a specific checkpoint."""
+    try:
+        if checkpoint_id < 0 or checkpoint_id >= len(rollback_info.get("checkpoints", [])):
+            # Rollback to original state
+            reset_result = git_runner.run_git_command(["checkout", "--", "."])
+            if reset_result.ok:
+                return {"success": True, "method": "full_reset"}
+            else:
+                return {"success": False, "error": reset_result.stderr}
+
+        # Rollback to specific checkpoint
+        checkpoint = rollback_info["checkpoints"][checkpoint_id]
+        stash_result = git_runner.run_git_command(["stash", "pop"])
+
+        if stash_result.ok:
+            return {
+                "success": True,
+                "method": "stash_pop",
+                "checkpoint_id": checkpoint_id
+            }
+        else:
+            return {
+                "success": False,
+                "error": stash_result.stderr,
+                "checkpoint_id": checkpoint_id
+            }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "checkpoint_id": checkpoint_id
+        }
 
 
 def main():
