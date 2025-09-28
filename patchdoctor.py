@@ -84,11 +84,39 @@ from rich.table import Table
 console = Console()
 
 
+# ===== AI AGENT INTEGRATION: Error Information System =====
+
+@dataclass
+class ErrorInfo:
+    """Structured error information for AI agent handling."""
+    code: str  # e.g., "NO_PATCHES_FOUND", "GIT_TIMEOUT", "PARSE_ERROR"
+    message: str
+    suggestion: str  # Recovery suggestion for agents
+    context: Dict[str, Any] = field(default_factory=dict)
+    recoverable: bool = True
+    severity: str = "error"  # "error", "warning", "info"
+
+
+# Common error codes for AI agent handling
+ERROR_NO_PATCHES_FOUND = "NO_PATCHES_FOUND"
+ERROR_GIT_TIMEOUT = "GIT_TIMEOUT"
+ERROR_GIT_COMMAND_FAILED = "GIT_COMMAND_FAILED"
+ERROR_PARSE_ERROR = "PARSE_ERROR"
+ERROR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
+ERROR_FILE_TOO_LARGE = "FILE_TOO_LARGE"
+ERROR_ENCODING_ERROR = "ENCODING_ERROR"
+ERROR_PERMISSION_DENIED = "PERMISSION_DENIED"
+ERROR_INVALID_PATCH_FORMAT = "INVALID_PATCH_FORMAT"
+ERROR_REPOSITORY_NOT_FOUND = "REPOSITORY_NOT_FOUND"
+
+
 # Exception hierarchy for consistent error handling
 class PatchDoctorError(Exception):
     """Base exception for PatchDoctor errors."""
 
-    pass
+    def __init__(self, message: str, error_info: Optional[ErrorInfo] = None):
+        super().__init__(message)
+        self.error_info = error_info
 
 
 class FileEncodingError(PatchDoctorError):
@@ -100,8 +128,8 @@ class FileEncodingError(PatchDoctorError):
 class GitCommandError(PatchDoctorError):
     """Error when git commands fail."""
 
-    def __init__(self, cmd: List[str], message: str):
-        super().__init__(f"Git failed: {cmd} → {message}")
+    def __init__(self, cmd: List[str], message: str, error_info: Optional[ErrorInfo] = None):
+        super().__init__(f"Git failed: {cmd} → {message}", error_info)
         self.cmd = cmd
 
 
@@ -1911,6 +1939,257 @@ class ReportGenerator:
         console.print(
             f"\n[bold green][SAVED][/bold green] [bold white]JSON report saved to:[/bold white] [bright_cyan]{output_file}[/bright_cyan]"
         )
+
+
+def run_validation(
+    patch_dir: str = ".",
+    repo_path: str = ".",
+    verbose: bool = False,
+    report_file: Optional[str] = None,
+    json_report_file: Optional[str] = None,
+    report_detailed: bool = False,
+    no_color: bool = False,
+    show_all_fixes: bool = False,
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    hunk_tolerance: int = DEFAULT_HUNK_SEARCH_TOLERANCE,
+    timeout: int = DEFAULT_SUBPROCESS_TIMEOUT,
+    max_file_size: int = MAX_FILE_SIZE_MB,
+) -> Dict[str, Any]:
+    """Run patchdoctor validation and return structured results for AI agent integration.
+
+    Args:
+        patch_dir: Directory containing patch files
+        repo_path: Repository root directory
+        verbose: Show detailed information
+        report_file: Save detailed report to file
+        json_report_file: Save JSON report for CI/CD
+        report_detailed: Include fix suggestions in reports
+        no_color: Disable colored output
+        show_all_fixes: Show all fix suggestions
+        similarity_threshold: Line similarity threshold (0.0-1.0)
+        hunk_tolerance: Search tolerance for hunk matching
+        timeout: Timeout for git operations in seconds
+        max_file_size: Maximum file size to process in MB
+
+    Returns:
+        Dict with validation results and summary stats
+    """
+    # Create config
+    config = Config(
+        patch_dir=patch_dir,
+        repo_path=repo_path,
+        verbose=verbose,
+        report_file=report_file,
+        json_report_file=json_report_file,
+        report_detailed=report_detailed,
+        no_color=no_color,
+        show_all_fixes=show_all_fixes,
+        similarity_threshold=similarity_threshold,
+        hunk_tolerance=hunk_tolerance,
+        timeout=timeout,
+        max_file_size=max_file_size,
+    )
+
+    # Find patch files
+    patch_files = list(Path(config.patch_dir).glob("*.patch"))
+    if not patch_files:
+        error_info = ErrorInfo(
+            code=ERROR_NO_PATCHES_FOUND,
+            message="No .patch files found in directory",
+            suggestion="Check that the patch directory contains .patch files, or create patch files using 'git format-patch'",
+            context={"patch_dir": config.patch_dir},
+            recoverable=True,
+            severity="error"
+        )
+        return {
+            "success": False,
+            "error": "No .patch files found",
+            "error_info": asdict(error_info),
+            "results": []
+        }
+
+    # Create verifier
+    verifier = PatchVerifier(
+        repo_path=config.repo_path,
+        verbose=config.verbose,
+        similarity_threshold=config.similarity_threshold,
+        hunk_search_tolerance=config.hunk_tolerance,
+        timeout=config.timeout,
+        max_file_size_mb=config.max_file_size,
+    )
+
+    # Verify patches
+    results = []
+    errors = []
+    for patch_file in patch_files:
+        try:
+            result = verifier.verify_patch(str(patch_file))
+            results.append(result)
+        except Exception as e:
+            # Create structured error information
+            error_info = ErrorInfo(
+                code=ERROR_PARSE_ERROR if "parse" in str(e).lower() else ERROR_GIT_COMMAND_FAILED,
+                message=f"Failed to verify patch: {e}",
+                suggestion="Check that the patch file is properly formatted and the repository is accessible",
+                context={"patch_file": str(patch_file), "error_type": type(e).__name__},
+                recoverable=True,
+                severity="error"
+            )
+            errors.append(asdict(error_info))
+
+            results.append(VerificationResult(
+                patch_info=PatchInfo(filename=str(patch_file), commit_hash="", author="", subject=f"Error: {e}"),
+                file_results=[],
+                overall_status="ERROR",
+                success_count=0,
+                total_count=0,
+            ))
+
+    # Generate reports if requested
+    report_gen = ReportGenerator(
+        verbose=config.verbose,
+        detailed=config.report_detailed,
+        show_all_fixes=config.show_all_fixes,
+    )
+
+    if config.report_file:
+        report_gen.generate_file_report(results, config.report_file)
+
+    if config.json_report_file:
+        report_gen.generate_json_report(results, config.json_report_file)
+
+    # Return structured data
+    return {
+        "success": len(errors) == 0,
+        "total_patches": len(results),
+        "fully_applied": sum(1 for r in results if r.overall_status == "FULLY_APPLIED"),
+        "partially_applied": sum(1 for r in results if r.overall_status == "PARTIALLY_APPLIED"),
+        "not_applied": sum(1 for r in results if r.overall_status == "NOT_APPLIED"),
+        "error_count": len(errors),
+        "errors": errors,
+        "results": [asdict(r) for r in results],
+    }
+
+
+def validate_from_content(
+    patch_content: str,
+    repo_path: str = ".",
+    verbose: bool = False,
+    similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    hunk_tolerance: int = DEFAULT_HUNK_SEARCH_TOLERANCE,
+    timeout: int = DEFAULT_SUBPROCESS_TIMEOUT,
+    max_file_size: int = MAX_FILE_SIZE_MB,
+) -> Dict[str, Any]:
+    """Validate a patch from string content directly for AI agent workflows.
+
+    Args:
+        patch_content: The patch content as a string
+        repo_path: Repository root directory
+        verbose: Show detailed information
+        similarity_threshold: Line similarity threshold (0.0-1.0)
+        hunk_tolerance: Search tolerance for hunk matching
+        timeout: Timeout for git operations in seconds
+        max_file_size: Maximum file size to process in MB
+
+    Returns:
+        Dict with validation result
+    """
+    import tempfile
+
+    # Write content to temp file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.patch', delete=False) as f:
+        f.write(patch_content)
+        temp_path = f.name
+
+    try:
+        # Parse patch
+        parser = PatchParser(similarity_threshold, max_file_size)
+        patch_info = parser.parse_patch_file(temp_path)
+
+        # Create verifier
+        verifier = PatchVerifier(
+            repo_path=repo_path,
+            verbose=verbose,
+            similarity_threshold=similarity_threshold,
+            hunk_search_tolerance=hunk_tolerance,
+            timeout=timeout,
+            max_file_size_mb=max_file_size,
+        )
+
+        # Verify
+        file_results = verifier.verify_patch_info(patch_info)
+
+        # Calculate status
+        success_count = sum(1 for r in file_results if r.verification_status == "OK")
+        total_count = len(file_results)
+
+        if success_count == total_count:
+            overall_status = "FULLY_APPLIED"
+        elif success_count > 0:
+            overall_status = "PARTIALLY_APPLIED"
+        else:
+            overall_status = "NOT_APPLIED"
+
+        result = VerificationResult(
+            patch_info=patch_info,
+            file_results=file_results,
+            overall_status=overall_status,
+            success_count=success_count,
+            total_count=total_count,
+        )
+
+        return {
+            "success": True,
+            "result": asdict(result),
+        }
+
+    except Exception as e:
+        # Create structured error information
+        error_info = ErrorInfo(
+            code=ERROR_PARSE_ERROR if "parse" in str(e).lower() else ERROR_GIT_COMMAND_FAILED,
+            message=f"Failed to validate patch content: {e}",
+            suggestion="Check that the patch content is properly formatted and the repository is accessible",
+            context={"error_type": type(e).__name__, "patch_length": len(patch_content)},
+            recoverable=True,
+            severity="error"
+        )
+        return {
+            "success": False,
+            "error": str(e),
+            "error_info": asdict(error_info)
+        }
+    finally:
+        Path(temp_path).unlink(missing_ok=True)
+
+
+def parse_report_status(report: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract summary statistics from a validation report for AI agent analysis.
+
+    Args:
+        report: The report dict from run_validation() or validate_from_content()
+
+    Returns:
+        Dict with summary stats
+    """
+    if not report.get("success"):
+        return {"error": report.get("error", "Unknown error")}
+
+    results = report.get("results", [])
+    total_files = sum(len(r.get("file_results", [])) for r in results)
+    ok_files = sum(
+        sum(1 for fr in r.get("file_results", []) if fr.get("verification_status") == "OK")
+        for r in results
+    )
+
+    return {
+        "total_patches": len(results),
+        "total_files": total_files,
+        "ok_files": ok_files,
+        "success_rate": ok_files / total_files if total_files > 0 else 0,
+        "fully_applied_patches": sum(1 for r in results if r.get("overall_status") == "FULLY_APPLIED"),
+        "partially_applied_patches": sum(1 for r in results if r.get("overall_status") == "PARTIALLY_APPLIED"),
+        "not_applied_patches": sum(1 for r in results if r.get("overall_status") == "NOT_APPLIED"),
+    }
 
 
 def main():
