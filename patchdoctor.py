@@ -2192,6 +2192,466 @@ def parse_report_status(report: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ===== AI AGENT INTEGRATION: Safe Fix Application =====
+
+def apply_safe_fixes(
+    verification_result: VerificationResult,
+    confirm: bool = True,
+    safety_levels: List[str] = None,
+    dry_run: bool = False,
+    repo_path: str = "."
+) -> Dict[str, Any]:
+    """Apply fix suggestions based on safety level with rollback support.
+
+    Args:
+        verification_result: Result from patch verification
+        confirm: Whether to prompt for confirmation before applying fixes
+        safety_levels: List of safety levels to apply ("safe", "review", "dangerous")
+        dry_run: If True, show what would be done without making changes
+        repo_path: Repository root directory
+
+    Returns:
+        Dict with applied, skipped, and failed fixes, plus rollback info
+    """
+    if safety_levels is None:
+        safety_levels = ["safe"]
+
+    applied = []
+    skipped = []
+    errors = []
+    rollback_info = {"git_stash_id": None, "original_branch": None}
+
+    try:
+        # Get current git state for rollback
+        git_runner = GitRunner(repo_path=repo_path)
+
+        # Get current branch
+        branch_result = git_runner.run_git_command(["branch", "--show-current"])
+        if branch_result.ok:
+            rollback_info["original_branch"] = branch_result.stdout.strip()
+
+        # Create stash for rollback safety
+        if not dry_run:
+            stash_result = git_runner.run_git_command(["stash", "push", "-m", "PatchDoctor auto-fix backup"])
+            if stash_result.ok and "No local changes to save" not in stash_result.stdout:
+                rollback_info["git_stash_id"] = "stash@{0}"
+
+        # Collect all fix suggestions from file results
+        all_fixes = []
+        for file_result in verification_result.file_results:
+            for fix in file_result.fix_suggestions:
+                if fix.safety_level in safety_levels:
+                    all_fixes.append((file_result.file_path, fix))
+
+        if not all_fixes:
+            return {
+                "applied": applied,
+                "skipped": skipped,
+                "errors": errors,
+                "rollback_info": rollback_info,
+                "summary": "No fixes found matching the specified safety levels"
+            }
+
+        # Apply fixes
+        for file_path, fix in all_fixes:
+            try:
+                if confirm and not dry_run:
+                    response = input(f"Apply {fix.fix_type} fix for {file_path}? ({fix.description}) [y/N]: ")
+                    if response.lower() not in ['y', 'yes']:
+                        skipped.append({
+                            "file_path": file_path,
+                            "fix": asdict(fix),
+                            "reason": "User declined"
+                        })
+                        continue
+
+                if dry_run:
+                    applied.append({
+                        "file_path": file_path,
+                        "fix": asdict(fix),
+                        "status": "dry_run",
+                        "commands": fix.commands
+                    })
+                    continue
+
+                # Apply the fix based on type
+                success = _apply_single_fix(git_runner, file_path, fix)
+
+                if success:
+                    applied.append({
+                        "file_path": file_path,
+                        "fix": asdict(fix),
+                        "status": "applied"
+                    })
+                else:
+                    errors.append({
+                        "file_path": file_path,
+                        "fix": asdict(fix),
+                        "error": "Fix application failed",
+                        "error_info": asdict(ErrorInfo(
+                            code="FIX_APPLICATION_FAILED",
+                            message=f"Failed to apply {fix.fix_type} fix",
+                            suggestion="Try applying the fix manually or check file permissions",
+                            context={"file_path": file_path, "fix_type": fix.fix_type},
+                            recoverable=True,
+                            severity="warning"
+                        ))
+                    })
+
+            except Exception as e:
+                errors.append({
+                    "file_path": file_path,
+                    "fix": asdict(fix),
+                    "error": str(e),
+                    "error_info": asdict(ErrorInfo(
+                        code="FIX_APPLICATION_ERROR",
+                        message=f"Exception during fix application: {e}",
+                        suggestion="Check the error details and try applying manually",
+                        context={"file_path": file_path, "exception_type": type(e).__name__},
+                        recoverable=True,
+                        severity="error"
+                    ))
+                })
+
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "errors": errors,
+            "rollback_info": rollback_info,
+            "summary": f"Applied {len(applied)} fixes, skipped {len(skipped)}, {len(errors)} errors"
+        }
+
+    except Exception as e:
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "errors": errors + [{
+                "error": str(e),
+                "error_info": asdict(ErrorInfo(
+                    code="APPLY_FIXES_FAILED",
+                    message=f"Failed to apply fixes: {e}",
+                    suggestion="Check repository state and permissions",
+                    context={"exception_type": type(e).__name__},
+                    recoverable=True,
+                    severity="error"
+                ))
+            }],
+            "rollback_info": rollback_info,
+            "summary": f"Fix application failed with error: {e}"
+        }
+
+
+def _apply_single_fix(git_runner: 'GitRunner', file_path: str, fix: FixSuggestion) -> bool:
+    """Apply a single fix suggestion.
+
+    Args:
+        git_runner: GitRunner instance for executing commands
+        file_path: Path to the file being fixed
+        fix: The fix suggestion to apply
+
+    Returns:
+        True if fix was applied successfully, False otherwise
+    """
+    try:
+        if fix.fix_type == "git_restore":
+            # Use git restore to revert file
+            for cmd in fix.commands:
+                if cmd.startswith("git restore"):
+                    result = git_runner.run_git_command(cmd.split()[2:])  # Skip "git restore"
+                    return result.ok
+
+        elif fix.fix_type == "mini_patch":
+            # Apply mini patch content
+            if fix.mini_patch_content:
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.patch', delete=False) as f:
+                    f.write(fix.mini_patch_content)
+                    patch_file = f.name
+
+                try:
+                    result = git_runner.run_git_command(["apply", patch_file])
+                    return result.ok
+                finally:
+                    Path(patch_file).unlink(missing_ok=True)
+
+        elif fix.fix_type == "manual_edit":
+            # For manual edits, we can't automatically apply them
+            # This would require more sophisticated text manipulation
+            return False
+
+        elif fix.fix_type == "file_create":
+            # Create missing files
+            for cmd in fix.commands:
+                if cmd.startswith("touch") or cmd.startswith("mkdir"):
+                    # Execute file creation commands
+                    import subprocess
+                    result = subprocess.run(cmd.split(), capture_output=True, text=True, cwd=git_runner.repo_path)
+                    if result.returncode != 0:
+                        return False
+            return True
+
+        return False
+
+    except Exception:
+        return False
+
+
+# ===== AI AGENT INTEGRATION: Patch Content Analysis Utilities =====
+
+def extract_missing_changes(verification_result: VerificationResult) -> List[Dict[str, Any]]:
+    """Extract detailed information about missing changes.
+
+    Args:
+        verification_result: Result from patch verification
+
+    Returns:
+        List of dicts with detailed information about missing changes
+    """
+    missing_changes = []
+
+    for file_result in verification_result.file_results:
+        if file_result.diff_analysis and file_result.diff_analysis.missing_hunks:
+            for hunk in file_result.diff_analysis.missing_hunks:
+                change_info = {
+                    "file_path": file_result.file_path,
+                    "hunk_info": {
+                        "old_start": hunk.old_start,
+                        "old_count": hunk.old_count,
+                        "new_start": hunk.new_start,
+                        "new_count": hunk.new_count
+                    },
+                    "expected_location": hunk.new_start,
+                    "content_lines": hunk.lines.copy(),
+                    "context_lines": _extract_context_lines(file_result.diff_analysis.file_content, hunk),
+                    "conflict_type": _determine_conflict_type(file_result, hunk)
+                }
+                missing_changes.append(change_info)
+
+    return missing_changes
+
+
+def generate_corrective_patch(verification_result: VerificationResult, output_file: str) -> bool:
+    """Generate a patch file containing only the missing changes.
+
+    Args:
+        verification_result: Result from patch verification
+        output_file: Path where to save the corrective patch
+
+    Returns:
+        True if patch was generated successfully, False otherwise
+    """
+    try:
+        missing_changes = extract_missing_changes(verification_result)
+        if not missing_changes:
+            return False
+
+        patch_content = []
+        current_file = None
+
+        for change in missing_changes:
+            file_path = change["file_path"]
+
+            # Add file header if this is a new file
+            if current_file != file_path:
+                current_file = file_path
+                patch_content.append(f"--- a/{file_path}")
+                patch_content.append(f"+++ b/{file_path}")
+
+            # Add hunk header
+            hunk_info = change["hunk_info"]
+            patch_content.append(
+                f"@@ -{hunk_info['old_start']},{hunk_info['old_count']} "
+                f"+{hunk_info['new_start']},{hunk_info['new_count']} @@"
+            )
+
+            # Add hunk content
+            patch_content.extend(change["content_lines"])
+
+        # Write patch file
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(patch_content))
+            if patch_content:  # Add final newline if content exists
+                f.write('\n')
+
+        return True
+
+    except Exception:
+        return False
+
+
+def split_large_patch(patch_content: str, strategy: str = "by_file") -> List[str]:
+    """Split large patches into smaller, manageable pieces.
+
+    Args:
+        patch_content: The patch content as a string
+        strategy: Split strategy - "by_file", "by_hunk", or "by_size"
+
+    Returns:
+        List of smaller patch strings
+    """
+    if strategy == "by_file":
+        return _split_patch_by_file(patch_content)
+    elif strategy == "by_hunk":
+        return _split_patch_by_hunk(patch_content)
+    elif strategy == "by_size":
+        return _split_patch_by_size(patch_content)
+    else:
+        return [patch_content]  # Return original if strategy unknown
+
+
+def summarize_patch_status(verification_result: VerificationResult) -> Dict[str, Any]:
+    """Generate a quick summary of patch status for AI agent analysis.
+
+    Args:
+        verification_result: Result from patch verification
+
+    Returns:
+        Dict with summary statistics and recommendations
+    """
+    total_files = len(verification_result.file_results)
+    ok_files = sum(1 for r in verification_result.file_results if r.verification_status == "OK")
+    missing_files = sum(1 for r in verification_result.file_results if r.verification_status == "MISSING")
+    modified_files = sum(1 for r in verification_result.file_results if r.verification_status == "MODIFIED")
+    error_files = sum(1 for r in verification_result.file_results if r.verification_status == "ERROR")
+
+    # Count total hunks and missing hunks
+    total_hunks = 0
+    missing_hunks = 0
+    for file_result in verification_result.file_results:
+        if file_result.diff_analysis:
+            total_hunks += file_result.diff_analysis.total_hunks
+            missing_hunks += len(file_result.diff_analysis.missing_hunks)
+
+    # Count fix suggestions by safety level
+    fix_counts = {"safe": 0, "review": 0, "dangerous": 0}
+    for file_result in verification_result.file_results:
+        for fix in file_result.fix_suggestions:
+            if fix.safety_level in fix_counts:
+                fix_counts[fix.safety_level] += 1
+
+    # Generate recommendations
+    recommendations = []
+    if missing_hunks > 0:
+        recommendations.append("Some hunks are missing - consider applying corrective patches")
+    if fix_counts["safe"] > 0:
+        recommendations.append(f"{fix_counts['safe']} safe fixes available for automatic application")
+    if fix_counts["review"] > 0:
+        recommendations.append(f"{fix_counts['review']} fixes require review before application")
+    if error_files > 0:
+        recommendations.append("Some files have errors - check patch format and repository state")
+
+    return {
+        "overall_status": verification_result.overall_status,
+        "file_summary": {
+            "total": total_files,
+            "ok": ok_files,
+            "missing": missing_files,
+            "modified": modified_files,
+            "errors": error_files
+        },
+        "hunk_summary": {
+            "total": total_hunks,
+            "missing": missing_hunks,
+            "applied": total_hunks - missing_hunks
+        },
+        "fix_suggestions": fix_counts,
+        "recommendations": recommendations,
+        "completion_percentage": (ok_files / total_files * 100) if total_files > 0 else 0
+    }
+
+
+def _extract_context_lines(file_content: Optional[List[str]], hunk: DiffHunk, context_lines: int = 3) -> List[str]:
+    """Extract context lines around a hunk location."""
+    if not file_content:
+        return []
+
+    start_line = max(0, hunk.new_start - context_lines - 1)
+    end_line = min(len(file_content), hunk.new_start + hunk.new_count + context_lines)
+
+    return file_content[start_line:end_line]
+
+
+def _determine_conflict_type(file_result: FileVerificationResult, hunk: DiffHunk) -> str:
+    """Determine the type of conflict for a missing hunk."""
+    if file_result.verification_status == "MISSING":
+        return "file_missing"
+    elif file_result.verification_status == "MODIFIED":
+        return "content_modified"
+    elif file_result.verification_status == "ERROR":
+        return "application_error"
+    else:
+        return "location_mismatch"
+
+
+def _split_patch_by_file(patch_content: str) -> List[str]:
+    """Split patch by individual files."""
+    patches = []
+    current_patch = []
+    lines = patch_content.split('\n')
+
+    for line in lines:
+        if line.startswith('diff --git') and current_patch:
+            # Start of new file, save current patch
+            patches.append('\n'.join(current_patch))
+            current_patch = [line]
+        else:
+            current_patch.append(line)
+
+    # Add the last patch
+    if current_patch:
+        patches.append('\n'.join(current_patch))
+
+    return patches
+
+
+def _split_patch_by_hunk(patch_content: str) -> List[str]:
+    """Split patch by individual hunks."""
+    patches = []
+    lines = patch_content.split('\n')
+    current_file_header = []
+    current_hunk = []
+
+    for line in lines:
+        if line.startswith('diff --git') or line.startswith('---') or line.startswith('+++'):
+            current_file_header.append(line)
+        elif line.startswith('@@'):
+            # Start of new hunk
+            if current_hunk:
+                # Save previous hunk with file header
+                patch = '\n'.join(current_file_header + current_hunk)
+                patches.append(patch)
+            current_hunk = [line]
+        elif current_hunk:  # We're in a hunk
+            current_hunk.append(line)
+
+    # Add the last hunk
+    if current_hunk:
+        patch = '\n'.join(current_file_header + current_hunk)
+        patches.append(patch)
+
+    return patches
+
+
+def _split_patch_by_size(patch_content: str, max_size: int = 50000) -> List[str]:
+    """Split patch by size (bytes)."""
+    if len(patch_content) <= max_size:
+        return [patch_content]
+
+    # Try to split by file first
+    file_patches = _split_patch_by_file(patch_content)
+
+    # If files are still too large, split by hunk
+    result_patches = []
+    for file_patch in file_patches:
+        if len(file_patch) <= max_size:
+            result_patches.append(file_patch)
+        else:
+            hunk_patches = _split_patch_by_hunk(file_patch)
+            result_patches.extend(hunk_patches)
+
+    return result_patches
+
+
 def main():
     """Main entry point for the patch verification script."""
 
