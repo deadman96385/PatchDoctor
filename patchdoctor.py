@@ -69,7 +69,7 @@ from datetime import datetime
 from email.utils import parsedate_to_datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cachetools
 
@@ -109,6 +109,8 @@ ERROR_ENCODING_ERROR = "ENCODING_ERROR"
 ERROR_PERMISSION_DENIED = "PERMISSION_DENIED"
 ERROR_INVALID_PATCH_FORMAT = "INVALID_PATCH_FORMAT"
 ERROR_REPOSITORY_NOT_FOUND = "REPOSITORY_NOT_FOUND"
+ERROR_TIMEOUT = "TIMEOUT"
+ERROR_INVALID_CONFIG = "INVALID_CONFIG"
 
 
 # Exception hierarchy for consistent error handling
