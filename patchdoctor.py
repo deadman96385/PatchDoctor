@@ -2652,6 +2652,185 @@ def _split_patch_by_size(patch_content: str, max_size: int = 50000) -> List[str]
     return result_patches
 
 
+# ===== AI AGENT INTEGRATION: Incremental Processing =====
+
+def validate_incremental(
+    patch_dir: str,
+    progress_callback: Optional[callable] = None,
+    early_stop_on_error: bool = False,
+    max_concurrent: int = 1,
+    **validation_kwargs
+) -> Dict[str, Any]:
+    """Process patches incrementally with progress reporting.
+
+    Args:
+        patch_dir: Directory containing patch files
+        progress_callback: Optional callback function called for each patch processed
+                          Signature: callback(patch_file: str, result: VerificationResult) -> None
+        early_stop_on_error: If True, stop processing on first error
+        max_concurrent: Maximum number of patches to process concurrently (default: 1)
+        **validation_kwargs: Additional arguments passed to PatchVerifier
+
+    Returns:
+        Dict with incremental processing results and summary
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
+
+    # Set default validation kwargs
+    config_defaults = {
+        "repo_path": ".",
+        "verbose": False,
+        "similarity_threshold": DEFAULT_SIMILARITY_THRESHOLD,
+        "hunk_search_tolerance": DEFAULT_HUNK_SEARCH_TOLERANCE,
+        "timeout": DEFAULT_SUBPROCESS_TIMEOUT,
+        "max_file_size_mb": MAX_FILE_SIZE_MB,
+    }
+    config_defaults.update(validation_kwargs)
+
+    # Find patch files
+    patch_files = list(Path(patch_dir).glob("*.patch"))
+    if not patch_files:
+        error_info = ErrorInfo(
+            code=ERROR_NO_PATCHES_FOUND,
+            message="No .patch files found in directory",
+            suggestion="Check that the patch directory contains .patch files",
+            context={"patch_dir": patch_dir},
+            recoverable=True,
+            severity="error"
+        )
+        return {
+            "success": False,
+            "error": "No .patch files found",
+            "error_info": asdict(error_info),
+            "results": [],
+            "processed_count": 0,
+            "total_count": 0
+        }
+
+    # Initialize results tracking
+    results = []
+    errors = []
+    processed_count = 0
+    total_count = len(patch_files)
+    should_stop = threading.Event()
+
+    def process_single_patch(patch_file: Path) -> Tuple[str, Optional[VerificationResult], Optional[Dict[str, Any]]]:
+        """Process a single patch file."""
+        if should_stop.is_set():
+            return str(patch_file), None, None
+
+        try:
+            # Create verifier for this patch
+            verifier = PatchVerifier(**config_defaults)
+            result = verifier.verify_patch(str(patch_file))
+            return str(patch_file), result, None
+
+        except Exception as e:
+            error_info = ErrorInfo(
+                code=ERROR_PARSE_ERROR if "parse" in str(e).lower() else ERROR_GIT_COMMAND_FAILED,
+                message=f"Failed to process patch: {e}",
+                suggestion="Check that the patch file is properly formatted",
+                context={"patch_file": str(patch_file), "error_type": type(e).__name__},
+                recoverable=True,
+                severity="error"
+            )
+            return str(patch_file), None, asdict(error_info)
+
+    # Process patches with optional parallelism
+    if max_concurrent > 1:
+        # Parallel processing
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            # Submit all tasks
+            future_to_patch = {
+                executor.submit(process_single_patch, patch_file): patch_file
+                for patch_file in patch_files
+            }
+
+            # Process completed tasks
+            for future in as_completed(future_to_patch):
+                patch_file, result, error = future.result()
+
+                if error:
+                    errors.append(error)
+                    if early_stop_on_error:
+                        should_stop.set()
+                        break
+                elif result:
+                    results.append(result)
+
+                processed_count += 1
+
+                # Call progress callback if provided
+                if progress_callback:
+                    try:
+                        progress_callback(patch_file, result)
+                    except Exception as cb_error:
+                        # Don't let callback errors stop processing
+                        error_info = ErrorInfo(
+                            code="PROGRESS_CALLBACK_ERROR",
+                            message=f"Progress callback failed: {cb_error}",
+                            suggestion="Check the progress callback function for errors",
+                            context={"callback_error": str(cb_error)},
+                            recoverable=True,
+                            severity="warning"
+                        )
+                        errors.append(asdict(error_info))
+
+    else:
+        # Sequential processing
+        for patch_file in patch_files:
+            if should_stop.is_set():
+                break
+
+            patch_file_str, result, error = process_single_patch(patch_file)
+
+            if error:
+                errors.append(error)
+                if early_stop_on_error:
+                    break
+            elif result:
+                results.append(result)
+
+            processed_count += 1
+
+            # Call progress callback if provided
+            if progress_callback:
+                try:
+                    progress_callback(patch_file_str, result)
+                except Exception as cb_error:
+                    error_info = ErrorInfo(
+                        code="PROGRESS_CALLBACK_ERROR",
+                        message=f"Progress callback failed: {cb_error}",
+                        suggestion="Check the progress callback function for errors",
+                        context={"callback_error": str(cb_error)},
+                        recoverable=True,
+                        severity="warning"
+                    )
+                    errors.append(asdict(error_info))
+
+    # Calculate summary statistics
+    fully_applied = sum(1 for r in results if r.overall_status == "FULLY_APPLIED")
+    partially_applied = sum(1 for r in results if r.overall_status == "PARTIALLY_APPLIED")
+    not_applied = sum(1 for r in results if r.overall_status == "NOT_APPLIED")
+
+    return {
+        "success": len(errors) == 0,
+        "processed_count": processed_count,
+        "total_count": total_count,
+        "completion_percentage": (processed_count / total_count * 100) if total_count > 0 else 0,
+        "fully_applied": fully_applied,
+        "partially_applied": partially_applied,
+        "not_applied": not_applied,
+        "error_count": len(errors),
+        "errors": errors,
+        "results": [asdict(r) for r in results],
+        "early_stopped": should_stop.is_set(),
+        "summary": f"Processed {processed_count}/{total_count} patches: {fully_applied} fully applied, {partially_applied} partial, {not_applied} not applied, {len(errors)} errors"
+    }
+
+
 def main():
     """Main entry point for the patch verification script."""
 
