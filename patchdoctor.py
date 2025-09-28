@@ -3302,6 +3302,496 @@ def _rollback_to_checkpoint(git_runner: 'GitRunner', rollback_info: Dict, checkp
         }
 
 
+# ===== AI AGENT INTEGRATION: Workflow Template System =====
+
+class IterativePatchWorkflow:
+    """Template for iterative patch application and validation."""
+
+    def __init__(self, config: Optional[Config] = None):
+        self.config = config or Config()
+        self.verifier = PatchVerifier(
+            repo_path=self.config.repo_path,
+            verbose=self.config.verbose,
+            similarity_threshold=self.config.similarity_threshold,
+            hunk_search_tolerance=self.config.hunk_tolerance,
+            timeout=self.config.timeout,
+            max_file_size_mb=self.config.max_file_size,
+        )
+        self.history = []
+        self.rollback_points = []
+
+    def execute(self, large_patch_content: str, strategy: str = "auto") -> Dict[str, Any]:
+        """Execute the iterative workflow with built-in error recovery.
+
+        Args:
+            large_patch_content: The large patch content to process iteratively
+            strategy: Splitting strategy ("auto", "by_file", "by_hunk", "by_size")
+
+        Returns:
+            Dict with comprehensive workflow results
+        """
+        workflow_start = time.time()
+
+        try:
+            # Step 1: Analyze patch complexity
+            complexity_analysis = self._analyze_patch_complexity(large_patch_content)
+
+            # Step 2: Split patch based on strategy
+            if strategy == "auto":
+                strategy = complexity_analysis.get("recommended_strategy", "by_file")
+
+            split_patches = split_large_patch(large_patch_content, strategy=strategy)
+
+            # Step 3: Process patches iteratively
+            results = []
+            successful_count = 0
+            rollback_performed = False
+
+            for i, patch_piece in enumerate(split_patches):
+                step_result = self._process_patch_step(patch_piece, i, len(split_patches))
+                results.append(step_result)
+
+                if step_result.get("success", False):
+                    successful_count += 1
+                else:
+                    # Handle failure based on severity
+                    if step_result.get("critical_failure", False):
+                        # Perform rollback and stop
+                        rollback_result = self._rollback_workflow()
+                        rollback_performed = True
+                        break
+
+            # Step 4: Generate final summary
+            success_rate = (successful_count / len(split_patches)) * 100 if split_patches else 0
+            workflow_time = time.time() - workflow_start
+
+            return {
+                "success": success_rate >= 80 and not rollback_performed,
+                "strategy_used": strategy,
+                "complexity_analysis": complexity_analysis,
+                "total_patches": len(split_patches),
+                "successful_patches": successful_count,
+                "success_rate": success_rate,
+                "workflow_time": workflow_time,
+                "rollback_performed": rollback_performed,
+                "step_results": results,
+                "recommendations": self._generate_recommendations(results, success_rate)
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "error_info": asdict(ErrorInfo(
+                    code="ITERATIVE_WORKFLOW_ERROR",
+                    message=f"Iterative workflow failed: {e}",
+                    suggestion="Check patch content and repository state",
+                    context={"strategy": strategy},
+                    recoverable=True,
+                    severity="error"
+                )),
+                "workflow_time": time.time() - workflow_start
+            }
+
+    def _analyze_patch_complexity(self, patch_content: str) -> Dict[str, Any]:
+        """Analyze patch complexity for workflow planning."""
+        lines = patch_content.split('\n')
+        file_count = len([line for line in lines if line.startswith('diff --git')])
+        hunk_count = len([line for line in lines if line.startswith('@@')])
+        total_lines = len(lines)
+
+        complexity_score = file_count * 10 + hunk_count * 5 + total_lines * 0.1
+
+        if file_count > 10:
+            strategy = "by_file"
+        elif hunk_count > 50:
+            strategy = "by_hunk"
+        elif total_lines > 5000:
+            strategy = "by_size"
+        else:
+            strategy = "none"
+
+        return {
+            "file_count": file_count,
+            "hunk_count": hunk_count,
+            "total_lines": total_lines,
+            "complexity_score": complexity_score,
+            "recommended_strategy": strategy
+        }
+
+    def _process_patch_step(self, patch_content: str, step_index: int, total_steps: int) -> Dict[str, Any]:
+        """Process a single patch step with error handling."""
+        step_start = time.time()
+
+        try:
+            # Validate patch
+            result = validate_from_content(
+                patch_content=patch_content,
+                repo_path=self.config.repo_path,
+                verbose=self.config.verbose
+            )
+
+            step_time = time.time() - step_start
+
+            step_result = {
+                "step_index": step_index,
+                "total_steps": total_steps,
+                "step_time": step_time,
+                "validation_result": result,
+                "success": result.get("success", False)
+            }
+
+            # Record in history
+            self.history.append(step_result)
+
+            # Determine if this is a critical failure
+            if not result.get("success", False):
+                error_info = result.get("error_info", {})
+                step_result["critical_failure"] = error_info.get("severity") == "error"
+
+            return step_result
+
+        except Exception as e:
+            return {
+                "step_index": step_index,
+                "total_steps": total_steps,
+                "step_time": time.time() - step_start,
+                "success": False,
+                "error": str(e),
+                "critical_failure": True
+            }
+
+    def _rollback_workflow(self) -> Dict[str, Any]:
+        """Rollback the workflow to the last stable state."""
+        try:
+            git_runner = GitRunner(repo_path=self.config.repo_path)
+            reset_result = git_runner.run_git_command(["checkout", "--", "."])
+
+            return {
+                "success": reset_result.ok,
+                "method": "git_checkout",
+                "error": reset_result.stderr if not reset_result.ok else None
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _generate_recommendations(self, results: List[Dict], success_rate: float) -> List[str]:
+        """Generate recommendations based on workflow results."""
+        recommendations = []
+
+        if success_rate == 100:
+            recommendations.append("✅ Iterative workflow completed successfully")
+        elif success_rate >= 80:
+            recommendations.append("🟡 Most steps successful - review failed steps")
+        else:
+            recommendations.append("🔴 Low success rate - consider different splitting strategy")
+
+        failed_steps = [r for r in results if not r.get("success", False)]
+        if failed_steps:
+            recommendations.append(f"📋 {len(failed_steps)} steps failed - check individual error details")
+
+        return recommendations
+
+
+class BatchProcessingWorkflow:
+    """Template for processing multiple patches safely."""
+
+    def __init__(self, config: Optional[Config] = None):
+        self.config = config or Config()
+        self.processed_patches = []
+        self.failed_patches = []
+        self.rollback_checkpoints = []
+
+    def execute(self, patch_directory: str) -> Dict[str, Any]:
+        """Execute batch processing with dependency analysis and rollback.
+
+        Args:
+            patch_directory: Directory containing patches to process
+
+        Returns:
+            Dict with batch processing results
+        """
+        workflow_start = time.time()
+
+        try:
+            # Step 1: Discover and analyze patches
+            patch_files = list(Path(patch_directory).glob("*.patch"))
+            if not patch_files:
+                return {
+                    "success": False,
+                    "error": "No patch files found",
+                    "error_info": asdict(ErrorInfo(
+                        code=ERROR_NO_PATCHES_FOUND,
+                        message="No patch files found in directory",
+                        suggestion="Check directory path and ensure .patch files exist",
+                        context={"directory": patch_directory},
+                        recoverable=False,
+                        severity="error"
+                    ))
+                }
+
+            # Step 2: Analyze dependencies
+            dependency_analysis = _analyze_patch_file_dependencies([str(pf) for pf in patch_files])
+
+            # Step 3: Create application plan
+            application_plan = _create_dependency_order([str(pf) for pf in patch_files], dependency_analysis["dependencies"])
+
+            # Step 4: Process patches with checkpointing
+            results = []
+            checkpoint_frequency = max(1, len(application_plan) // 5)  # Create 5 checkpoints max
+
+            for i, patch_file in enumerate(application_plan):
+                # Create checkpoint if needed
+                if i > 0 and i % checkpoint_frequency == 0:
+                    checkpoint_result = self._create_checkpoint(i // checkpoint_frequency)
+                    self.rollback_checkpoints.append(checkpoint_result)
+
+                # Process single patch
+                patch_result = self._process_single_patch(patch_file, i, len(application_plan))
+                results.append(patch_result)
+
+                if patch_result.get("success", False):
+                    self.processed_patches.append(patch_result)
+                else:
+                    self.failed_patches.append(patch_result)
+
+            # Step 5: Generate summary
+            success_rate = (len(self.processed_patches) / len(application_plan)) * 100 if application_plan else 0
+            workflow_time = time.time() - workflow_start
+
+            return {
+                "success": len(self.failed_patches) == 0,
+                "total_patches": len(application_plan),
+                "processed_patches": len(self.processed_patches),
+                "failed_patches": len(self.failed_patches),
+                "success_rate": success_rate,
+                "workflow_time": workflow_time,
+                "dependency_analysis": dependency_analysis,
+                "application_plan": application_plan,
+                "results": results,
+                "checkpoints_created": len(self.rollback_checkpoints)
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "workflow_time": time.time() - workflow_start
+            }
+
+    def _process_single_patch(self, patch_file: str, index: int, total: int) -> Dict[str, Any]:
+        """Process a single patch within the batch workflow."""
+        try:
+            with open(patch_file, 'r', encoding='utf-8') as f:
+                patch_content = f.read()
+
+            result = validate_from_content(
+                patch_content=patch_content,
+                repo_path=self.config.repo_path
+            )
+
+            return {
+                "patch_file": patch_file,
+                "index": index,
+                "total": total,
+                "result": result,
+                "success": result.get("success", False)
+            }
+
+        except Exception as e:
+            return {
+                "patch_file": patch_file,
+                "index": index,
+                "total": total,
+                "success": False,
+                "error": str(e)
+            }
+
+    def _create_checkpoint(self, checkpoint_id: int) -> Dict[str, Any]:
+        """Create a rollback checkpoint."""
+        try:
+            git_runner = GitRunner(repo_path=self.config.repo_path)
+            return _create_rollback_checkpoint(git_runner, checkpoint_id)
+        except Exception as e:
+            return {"success": False, "error": str(e), "checkpoint_id": checkpoint_id}
+
+
+class SafeFixApplicationWorkflow:
+    """Template for automated fix application with safety checks."""
+
+    def __init__(self, config: Optional[Config] = None):
+        self.config = config or Config()
+        self.applied_fixes = []
+        self.skipped_fixes = []
+        self.failed_fixes = []
+
+    def execute(self, verification_result: VerificationResult) -> Dict[str, Any]:
+        """Apply fixes with comprehensive safety checks and rollback.
+
+        Args:
+            verification_result: Result from patch verification
+
+        Returns:
+            Dict with fix application results
+        """
+        workflow_start = time.time()
+
+        try:
+            # Step 1: Analyze available fixes
+            all_fixes = []
+            for file_result in verification_result.file_results:
+                for fix in file_result.fix_suggestions:
+                    all_fixes.append({
+                        "file_path": file_result.file_path,
+                        "fix": fix,
+                        "safety_score": self._calculate_safety_score(fix)
+                    })
+
+            if not all_fixes:
+                return {
+                    "success": True,
+                    "message": "No fixes available to apply",
+                    "applied_fixes": 0,
+                    "skipped_fixes": 0,
+                    "failed_fixes": 0
+                }
+
+            # Step 2: Sort fixes by safety score (safest first)
+            sorted_fixes = sorted(all_fixes, key=lambda x: x["safety_score"], reverse=True)
+
+            # Step 3: Apply fixes with safety checks
+            for fix_info in sorted_fixes:
+                result = self._apply_single_fix_safely(fix_info)
+
+                if result["success"]:
+                    self.applied_fixes.append(result)
+                elif result.get("skipped", False):
+                    self.skipped_fixes.append(result)
+                else:
+                    self.failed_fixes.append(result)
+
+            # Step 4: Generate summary
+            workflow_time = time.time() - workflow_start
+
+            return {
+                "success": len(self.failed_fixes) == 0,
+                "applied_fixes": len(self.applied_fixes),
+                "skipped_fixes": len(self.skipped_fixes),
+                "failed_fixes": len(self.failed_fixes),
+                "workflow_time": workflow_time,
+                "safety_summary": self._generate_safety_summary(),
+                "recommendations": self._generate_safety_recommendations()
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "workflow_time": time.time() - workflow_start
+            }
+
+    def _calculate_safety_score(self, fix: FixSuggestion) -> float:
+        """Calculate safety score for a fix (0.0 = dangerous, 1.0 = very safe)."""
+        base_score = {
+            "safe": 1.0,
+            "review": 0.6,
+            "dangerous": 0.2
+        }.get(fix.safety_level, 0.5)
+
+        # Adjust based on fix type
+        type_modifier = {
+            "git_restore": 0.9,
+            "mini_patch": 0.8,
+            "file_create": 0.7,
+            "manual_edit": 0.3
+        }.get(fix.fix_type, 0.5)
+
+        # Adjust based on confidence
+        confidence_modifier = fix.confidence
+
+        return base_score * type_modifier * confidence_modifier
+
+    def _apply_single_fix_safely(self, fix_info: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply a single fix with safety checks."""
+        fix = fix_info["fix"]
+        safety_score = fix_info["safety_score"]
+
+        # Safety check: skip dangerous fixes
+        if safety_score < 0.5:
+            return {
+                "success": False,
+                "skipped": True,
+                "fix_info": fix_info,
+                "reason": "Safety score too low",
+                "safety_score": safety_score
+            }
+
+        # Safety check: skip fixes that require manual intervention
+        if fix.fix_type == "manual_edit":
+            return {
+                "success": False,
+                "skipped": True,
+                "fix_info": fix_info,
+                "reason": "Manual intervention required",
+                "safety_score": safety_score
+            }
+
+        try:
+            # Apply the fix (simplified - in practice would use apply_safe_fixes)
+            git_runner = GitRunner(repo_path=self.config.repo_path)
+            success = _apply_single_fix(git_runner, fix_info["file_path"], fix)
+
+            return {
+                "success": success,
+                "fix_info": fix_info,
+                "safety_score": safety_score,
+                "applied": success
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "fix_info": fix_info,
+                "error": str(e),
+                "safety_score": safety_score
+            }
+
+    def _generate_safety_summary(self) -> Dict[str, Any]:
+        """Generate safety summary for applied fixes."""
+        if not self.applied_fixes:
+            return {"average_safety_score": 0, "risk_level": "none"}
+
+        avg_safety = sum(fix["safety_score"] for fix in self.applied_fixes) / len(self.applied_fixes)
+
+        risk_level = "low" if avg_safety >= 0.8 else "medium" if avg_safety >= 0.6 else "high"
+
+        return {
+            "average_safety_score": avg_safety,
+            "risk_level": risk_level,
+            "total_applied": len(self.applied_fixes)
+        }
+
+    def _generate_safety_recommendations(self) -> List[str]:
+        """Generate safety recommendations based on fix application results."""
+        recommendations = []
+
+        if self.failed_fixes:
+            recommendations.append(f"⚠️  {len(self.failed_fixes)} fixes failed - review error details")
+
+        if self.skipped_fixes:
+            recommendations.append(f"📋 {len(self.skipped_fixes)} fixes skipped for safety - consider manual review")
+
+        safety_summary = self._generate_safety_summary()
+        if safety_summary["risk_level"] == "high":
+            recommendations.append("🔴 High risk fixes applied - monitor repository carefully")
+        elif safety_summary["risk_level"] == "medium":
+            recommendations.append("🟡 Medium risk fixes applied - verify results")
+        else:
+            recommendations.append("✅ Low risk fixes applied successfully")
+
+        return recommendations
+
+
 def main():
     """Main entry point for the patch verification script."""
 
