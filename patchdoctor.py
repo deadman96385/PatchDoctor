@@ -303,7 +303,13 @@ class HunkVerificationResult:
 
 @dataclass
 class Config:
-    """Configuration for PatchDoctor with validation."""
+    """Configuration for PatchDoctor with validation.
+
+    Supports predefined configuration profiles for common AI agent workflows:
+    - Config.strict_mode(): High precision validation
+    - Config.lenient_mode(): Flexible fuzzy matching
+    - Config.fast_mode(): Speed-optimized processing
+    """
 
     patch_dir: str = "."
     repo_path: str = "."
@@ -337,6 +343,86 @@ class Config:
             raise ValueError(
                 f"Max file size must be positive, got {self.max_file_size}"
             )
+
+    @classmethod
+    def strict_mode(cls, **overrides) -> "Config":
+        """High precision mode for critical validation.
+
+        Uses conservative settings for maximum accuracy:
+        - High similarity threshold (0.8) for precise matching
+        - Low hunk tolerance (2) to avoid false positives
+        - Extended timeout (60s) for thorough analysis
+
+        Args:
+            **overrides: Override any default settings
+
+        Returns:
+            Config: Configuration optimized for strict validation
+
+        Example:
+            config = Config.strict_mode(repo_path="/path/to/repo")
+        """
+        defaults = {
+            "similarity_threshold": 0.8,
+            "hunk_tolerance": 2,
+            "timeout": 60,
+        }
+        defaults.update(overrides)
+        return cls(**defaults)
+
+    @classmethod
+    def lenient_mode(cls, **overrides) -> "Config":
+        """Flexible mode for fuzzy matching scenarios.
+
+        Uses permissive settings for maximum compatibility:
+        - Low similarity threshold (0.3) for fuzzy matching
+        - High hunk tolerance (10) to handle code drift
+        - Moderate timeout (30s) for responsive operation
+
+        Args:
+            **overrides: Override any default settings
+
+        Returns:
+            Config: Configuration optimized for flexible validation
+
+        Example:
+            config = Config.lenient_mode(verbose=True)
+        """
+        defaults = {
+            "similarity_threshold": 0.3,
+            "hunk_tolerance": 10,
+            "timeout": 30,
+        }
+        defaults.update(overrides)
+        return cls(**defaults)
+
+    @classmethod
+    def fast_mode(cls, **overrides) -> "Config":
+        """Speed-optimized mode for quick validation.
+
+        Uses balanced settings optimized for performance:
+        - Moderate similarity threshold (0.5) for good speed/accuracy balance
+        - Medium hunk tolerance (5) for reasonable flexibility
+        - Short timeout (15s) for fast response
+        - Smaller file size limit (50MB) to avoid large file overhead
+
+        Args:
+            **overrides: Override any default settings
+
+        Returns:
+            Config: Configuration optimized for speed
+
+        Example:
+            config = Config.fast_mode(patch_dir="./patches")
+        """
+        defaults = {
+            "similarity_threshold": 0.5,
+            "hunk_tolerance": 5,
+            "timeout": 15,
+            "max_file_size": 50,
+        }
+        defaults.update(overrides)
+        return cls(**defaults)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Config":
@@ -438,21 +524,46 @@ class GitRunner:
         repo_path: str = ".",
         timeout: int = DEFAULT_SUBPROCESS_TIMEOUT,
         cache_ttl: int = 30,
+        enable_performance_monitoring: bool = False,
     ):
         self.repo_path = Path(repo_path)
         self.timeout = timeout
+        self.enable_performance_monitoring = enable_performance_monitoring
         self._result_cache: cachetools.TTLCache[str, GitResult] = cachetools.TTLCache(
-            maxsize=128, ttl=cache_ttl
+            maxsize=256, ttl=cache_ttl  # Increased cache size for better performance
         )  # Thread-safe TTL cache
+        self._cache_stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "total_requests": 0,
+        }
+        self._performance_metrics = {
+            "command_times": [],
+            "cache_hit_ratio": 0.0,
+            "average_command_time": 0.0,
+        }
 
     def run_git_command(self, args: List[str], use_cache: bool = True) -> GitResult:
         """Run a git command with caching and error handling."""
+        import time
+
+        start_time = time.time() if self.enable_performance_monitoring else None
         cmd = ["git"] + args
         cache_key = f"{self.repo_path}:{' '.join(cmd)}"
 
+        self._cache_stats["total_requests"] += 1
+
         # Check cache if enabled
         if use_cache and cache_key in self._result_cache:
+            self._cache_stats["hits"] += 1
+            if self.enable_performance_monitoring and start_time:
+                self._update_performance_metrics(time.time() - start_time, cache_hit=True)
             return self._result_cache[cache_key]
+
+        # Cache miss
+        if use_cache:
+            self._cache_stats["misses"] += 1
 
         try:
             result = subprocess.run(
@@ -475,6 +586,10 @@ class GitRunner:
             # Cache successful results
             if use_cache and git_result.ok:
                 self._result_cache[cache_key] = git_result
+
+            # Update performance metrics
+            if self.enable_performance_monitoring and start_time:
+                self._update_performance_metrics(time.time() - start_time, cache_hit=False)
 
             return git_result
 
@@ -500,12 +615,101 @@ class GitRunner:
             return git_result
 
     def get_cache_stats(self) -> Dict[str, Union[int, float]]:
-        """Get cache statistics."""
-        return {
+        """Get comprehensive cache and performance statistics."""
+        total_requests = self._cache_stats["total_requests"]
+        hit_ratio = (
+            self._cache_stats["hits"] / total_requests if total_requests > 0 else 0.0
+        )
+
+        stats = {
             "cached_entries": len(self._result_cache),
             "maxsize": self._result_cache.maxsize,
             "ttl": self._result_cache.ttl,
+            "cache_hits": self._cache_stats["hits"],
+            "cache_misses": self._cache_stats["misses"],
+            "cache_hit_ratio": hit_ratio,
+            "total_requests": total_requests,
         }
+
+        if self.enable_performance_monitoring:
+            stats.update(self._performance_metrics)
+
+        return stats
+
+    def _update_performance_metrics(self, command_time: float, cache_hit: bool = False) -> None:
+        """Update performance metrics with command timing data."""
+        if not cache_hit:  # Only record actual command execution times
+            self._performance_metrics["command_times"].append(command_time)
+
+            # Keep only last 100 measurements to avoid memory growth
+            if len(self._performance_metrics["command_times"]) > 100:
+                self._performance_metrics["command_times"] = (
+                    self._performance_metrics["command_times"][-100:]
+                )
+
+        # Update calculated metrics
+        if self._performance_metrics["command_times"]:
+            self._performance_metrics["average_command_time"] = (
+                sum(self._performance_metrics["command_times"])
+                / len(self._performance_metrics["command_times"])
+            )
+
+        total_requests = self._cache_stats["total_requests"]
+        if total_requests > 0:
+            self._performance_metrics["cache_hit_ratio"] = (
+                self._cache_stats["hits"] / total_requests
+            )
+
+    def invalidate_cache(self, pattern: Optional[str] = None) -> int:
+        """Invalidate cache entries, optionally matching a pattern.
+
+        Args:
+            pattern: Optional regex pattern to match cache keys
+
+        Returns:
+            int: Number of entries invalidated
+        """
+        if pattern is None:
+            count = len(self._result_cache)
+            self._result_cache.clear()
+            return count
+
+        import re
+        pattern_re = re.compile(pattern)
+        keys_to_remove = [
+            key for key in self._result_cache.keys()
+            if pattern_re.search(key)
+        ]
+
+        for key in keys_to_remove:
+            del self._result_cache[key]
+
+        return len(keys_to_remove)
+
+    def get_performance_report(self) -> str:
+        """Generate a human-readable performance report."""
+        if not self.enable_performance_monitoring:
+            return "Performance monitoring is disabled"
+
+        stats = self.get_cache_stats()
+
+        report = f"""GitRunner Performance Report:
+Cache Statistics:
+  - Cached entries: {stats['cached_entries']}/{stats['maxsize']}
+  - Hit ratio: {stats['cache_hit_ratio']:.2%}
+  - Total requests: {stats['total_requests']}
+
+Performance Metrics:
+  - Average command time: {stats['average_command_time']:.3f}s
+  - Command samples: {len(self._performance_metrics['command_times'])}
+"""
+
+        if self._performance_metrics["command_times"]:
+            min_time = min(self._performance_metrics["command_times"])
+            max_time = max(self._performance_metrics["command_times"])
+            report += f"  - Min/Max command time: {min_time:.3f}s / {max_time:.3f}s\n"
+
+        return report
 
     def get_file_status(self, filepath: str) -> Tuple[bool, str]:
         """Get git status for a specific file."""
@@ -923,15 +1127,20 @@ class PatchParser:
 class RepositoryScanner:
     """Scans the current repository state and compares against patch expectations."""
 
-    def __init__(self, repo_path: str = ".", timeout: int = DEFAULT_SUBPROCESS_TIMEOUT):
+    def __init__(self, repo_path: str = ".", timeout: int = DEFAULT_SUBPROCESS_TIMEOUT, enable_performance_monitoring: bool = False):
         self.repo_path = Path(repo_path)
         self.timeout = timeout
         self._file_content_cache: cachetools.LRUCache[
             Tuple[str, float, int], List[str]
         ] = cachetools.LRUCache(
-            maxsize=32
+            maxsize=64  # Increased cache size for better performance
         )  # LRU cache for file contents
-        self.git_runner = GitRunner(repo_path, timeout)  # Use unified git runner
+        self._cache_stats = {
+            "hits": 0,
+            "misses": 0,
+            "total_requests": 0,
+        }
+        self.git_runner = GitRunner(repo_path, timeout, enable_performance_monitoring=enable_performance_monitoring)  # Use unified git runner
 
     def get_file_status(self, filepath: str) -> Tuple[bool, str]:
         """Check if a file exists and get its git status."""
@@ -966,6 +1175,7 @@ class RepositoryScanner:
     def get_file_content(self, filepath: str) -> Optional[List[str]]:
         """Get the current content of a file as a list of lines with caching."""
         full_path = self.repo_path / filepath
+        self._cache_stats["total_requests"] += 1
 
         # Check if file exists and get its modification time
         try:
@@ -986,7 +1196,11 @@ class RepositoryScanner:
             # Use cached content if available (key includes mtime and size for invalidation)
             cache_key = (str(full_path), stat_info.st_mtime, stat_info.st_size)
             if cache_key in self._file_content_cache:
+                self._cache_stats["hits"] += 1
                 return self._file_content_cache[cache_key]
+
+            # Cache miss
+            self._cache_stats["misses"] += 1
 
         except (OSError, PermissionError):
             return None
@@ -1010,6 +1224,32 @@ class RepositoryScanner:
         self._file_content_cache[cache_key] = content
 
         return content
+
+    def get_cache_stats(self) -> Dict[str, Union[int, float]]:
+        """Get file content cache statistics."""
+        total_requests = self._cache_stats["total_requests"]
+        hit_ratio = (
+            self._cache_stats["hits"] / total_requests if total_requests > 0 else 0.0
+        )
+
+        return {
+            "cached_files": len(self._file_content_cache),
+            "maxsize": self._file_content_cache.maxsize,
+            "cache_hits": self._cache_stats["hits"],
+            "cache_misses": self._cache_stats["misses"],
+            "cache_hit_ratio": hit_ratio,
+            "total_requests": total_requests,
+        }
+
+    def clear_file_cache(self) -> int:
+        """Clear the file content cache.
+
+        Returns:
+            int: Number of entries cleared
+        """
+        count = len(self._file_content_cache)
+        self._file_content_cache.clear()
+        return count
 
 
 class PatchVerifier:
@@ -2558,6 +2798,186 @@ def summarize_patch_status(verification_result: VerificationResult) -> Dict[str,
         "fix_suggestions": fix_counts,
         "recommendations": recommendations,
         "completion_percentage": (ok_files / total_files * 100) if total_files > 0 else 0
+    }
+
+
+def generate_api_schema() -> Dict[str, Any]:
+    """Generate OpenAPI-style schema for all public AI agent functions.
+
+    Returns:
+        Dict containing complete API schema with function signatures, parameters,
+        return types, error codes, and usage examples.
+    """
+    import inspect
+    import typing
+    from typing import get_type_hints
+
+    def get_function_schema(func) -> Dict[str, Any]:
+        """Extract schema information from a function."""
+        try:
+            signature = inspect.signature(func)
+            type_hints = get_type_hints(func)
+
+            parameters = {}
+            for param_name, param in signature.parameters.items():
+                param_info = {
+                    "required": param.default == inspect.Parameter.empty,
+                    "type": str(type_hints.get(param_name, type(param.default).__name__ if param.default != inspect.Parameter.empty else "Any"))
+                }
+                if param.default != inspect.Parameter.empty:
+                    param_info["default"] = param.default
+                parameters[param_name] = param_info
+
+            return_type = type_hints.get('return', 'Any')
+
+            return {
+                "description": inspect.getdoc(func) or "No description available",
+                "parameters": parameters,
+                "return_type": str(return_type),
+                "signature": str(signature)
+            }
+        except Exception as e:
+            return {
+                "description": f"Schema extraction failed: {e}",
+                "parameters": {},
+                "return_type": "Unknown",
+                "signature": "Unknown"
+            }
+
+    # Define AI agent functions to include in schema
+    ai_functions = {
+        "run_validation": run_validation,
+        "validate_from_content": validate_from_content,
+        "apply_safe_fixes": apply_safe_fixes,
+        "extract_missing_changes": extract_missing_changes,
+        "generate_corrective_patch": generate_corrective_patch,
+        "split_large_patch": split_large_patch,
+        "summarize_patch_status": summarize_patch_status,
+        "validate_incremental": validate_incremental,
+        "validate_patch_sequence": validate_patch_sequence,
+        "create_patch_application_plan": create_patch_application_plan,
+    }
+
+    # Generate schema for each function
+    functions_schema = {}
+    for name, func in ai_functions.items():
+        functions_schema[name] = get_function_schema(func)
+
+    # Define data types schema
+    data_types = {
+        "ErrorInfo": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Error code identifier"},
+                "message": {"type": "string", "description": "Human-readable error message"},
+                "suggestion": {"type": "string", "description": "Recovery suggestion for AI agents"},
+                "context": {"type": "object", "description": "Additional context information"},
+                "recoverable": {"type": "boolean", "description": "Whether error is recoverable"},
+                "severity": {"type": "string", "enum": ["error", "warning", "info"]}
+            }
+        },
+        "VerificationResult": {
+            "type": "object",
+            "properties": {
+                "overall_status": {"type": "string", "enum": ["FULLY_APPLIED", "PARTIALLY_APPLIED", "NOT_APPLIED", "ANALYSIS_ERROR"]},
+                "success_count": {"type": "integer", "description": "Number of successfully applied files"},
+                "total_count": {"type": "integer", "description": "Total number of files in patch"},
+                "file_results": {"type": "array", "description": "Results for each file in the patch"}
+            }
+        },
+        "Config": {
+            "type": "object",
+            "properties": {
+                "patch_dir": {"type": "string", "default": "."},
+                "repo_path": {"type": "string", "default": "."},
+                "similarity_threshold": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "hunk_tolerance": {"type": "integer", "minimum": 0},
+                "timeout": {"type": "integer", "minimum": 1}
+            },
+            "factory_methods": [
+                {"name": "strict_mode", "description": "High precision validation"},
+                {"name": "lenient_mode", "description": "Flexible fuzzy matching"},
+                {"name": "fast_mode", "description": "Speed-optimized processing"}
+            ]
+        }
+    }
+
+    # Define error codes
+    error_codes = {
+        ERROR_NO_PATCHES_FOUND: "No patch files found in specified directory",
+        ERROR_GIT_COMMAND_FAILED: "Git command execution failed",
+        ERROR_PARSE_ERROR: "Failed to parse patch file format",
+        ERROR_FILE_NOT_FOUND: "Target file not found in repository",
+        ERROR_TIMEOUT: "Operation timed out",
+        ERROR_PERMISSION_DENIED: "Permission denied accessing file or directory",
+        ERROR_INVALID_CONFIG: "Invalid configuration parameters provided"
+    }
+
+    # Define usage examples
+    examples = {
+        "basic_validation": {
+            "description": "Basic patch validation workflow",
+            "code": """
+# Validate a patch file
+result = run_validation("my_patch.patch")
+if result["success"]:
+    verification_result = result["verification_result"]
+    print(f"Status: {verification_result.overall_status}")
+else:
+    error_info = result.get("error_info", {})
+    print(f"Error: {error_info.get('message')}")
+    print(f"Suggestion: {error_info.get('suggestion')}")
+"""
+        },
+        "safe_fix_application": {
+            "description": "Automatically apply safe fixes",
+            "code": """
+# Validate patch and apply safe fixes
+result = run_validation("my_patch.patch")
+if result["success"]:
+    fix_result = apply_safe_fixes(
+        result["verification_result"],
+        confirm=False,
+        safety_levels=["safe"]
+    )
+    print(f"Applied: {len(fix_result['applied'])} fixes")
+    print(f"Skipped: {len(fix_result['skipped'])} fixes")
+"""
+        },
+        "configuration_profiles": {
+            "description": "Using predefined configuration profiles",
+            "code": """
+# Use strict mode for critical validation
+config = Config.strict_mode(repo_path="/path/to/repo")
+verifier = PatchVerifier(**asdict(config))
+
+# Use fast mode for quick checks
+config = Config.fast_mode(patch_dir="./patches")
+result = run_validation("patch.patch", **asdict(config))
+"""
+        }
+    }
+
+    return {
+        "openapi": "3.0.0",
+        "info": {
+            "title": "PatchDoctor AI Agent API",
+            "version": "2.0.0",
+            "description": "API schema for PatchDoctor AI agent integration functions"
+        },
+        "functions": functions_schema,
+        "data_types": data_types,
+        "error_codes": error_codes,
+        "examples": examples,
+        "generation_timestamp": str(__import__("datetime").datetime.now()),
+        "supported_operations": [
+            "patch_validation",
+            "safe_fix_application",
+            "incremental_processing",
+            "batch_operations",
+            "patch_analysis",
+            "configuration_management"
+        ]
     }
 
 
