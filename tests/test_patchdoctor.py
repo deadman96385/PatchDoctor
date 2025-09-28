@@ -219,3 +219,432 @@ index 0000000..e69de29
     assert isinstance(json_data, list)
     assert "patch_info" in json_data[0]
     assert "file_results" in json_data[0]
+
+
+# AI Agent Integration Tests
+
+def test_error_info_structure():
+    """Test ErrorInfo dataclass structure and functionality."""
+    from patchdoctor import ErrorInfo
+
+    error_info = ErrorInfo(
+        code="TEST_ERROR",
+        message="Test error message",
+        suggestion="Try this recovery action",
+        context={"file": "test.txt", "line": 42},
+        recoverable=True,
+        severity="error"
+    )
+
+    assert error_info.code == "TEST_ERROR"
+    assert error_info.message == "Test error message"
+    assert error_info.suggestion == "Try this recovery action"
+    assert error_info.context["file"] == "test.txt"
+    assert error_info.recoverable is True
+    assert error_info.severity == "error"
+
+
+def test_config_profiles():
+    """Test configuration profile factory methods."""
+    from patchdoctor import Config
+
+    # Test strict mode
+    strict_config = Config.strict_mode(repo_path="/test/repo")
+    assert strict_config.similarity_threshold == 0.8
+    assert strict_config.hunk_tolerance == 2
+    assert strict_config.timeout == 60
+    assert strict_config.repo_path == "/test/repo"
+
+    # Test lenient mode
+    lenient_config = Config.lenient_mode(verbose=True)
+    assert lenient_config.similarity_threshold == 0.3
+    assert lenient_config.hunk_tolerance == 10
+    assert lenient_config.timeout == 30
+    assert lenient_config.verbose is True
+
+    # Test fast mode
+    fast_config = Config.fast_mode(patch_dir="./patches")
+    assert fast_config.similarity_threshold == 0.5
+    assert fast_config.hunk_tolerance == 5
+    assert fast_config.timeout == 15
+    assert fast_config.max_file_size == 50
+    assert fast_config.patch_dir == "./patches"
+
+
+def test_gitrunner_performance_monitoring(tmp_path):
+    """Test GitRunner performance monitoring capabilities."""
+    from patchdoctor import GitRunner
+
+    # Test with performance monitoring enabled
+    git_runner = GitRunner(
+        repo_path=str(tmp_path),
+        enable_performance_monitoring=True
+    )
+
+    # Run some git commands
+    result1 = git_runner.run_git_command(["status", "--porcelain"])
+    result2 = git_runner.run_git_command(["status", "--porcelain"])  # Should be cached
+
+    # Check cache stats
+    stats = git_runner.get_cache_stats()
+    assert "cache_hits" in stats
+    assert "cache_misses" in stats
+    assert "total_requests" in stats
+    assert stats["total_requests"] >= 2
+    assert stats["cache_hits"] >= 1  # Second request should be cached
+
+    # Check performance report
+    report = git_runner.get_performance_report()
+    assert "Performance Report" in report
+    assert "Cache Statistics" in report
+
+
+def test_gitrunner_cache_invalidation(tmp_path):
+    """Test GitRunner cache invalidation functionality."""
+    from patchdoctor import GitRunner
+
+    git_runner = GitRunner(repo_path=str(tmp_path))
+
+    # Run command to populate cache
+    git_runner.run_git_command(["status", "--porcelain"])
+
+    # Check cache has entries
+    stats_before = git_runner.get_cache_stats()
+    assert stats_before["cached_entries"] > 0
+
+    # Test full cache invalidation
+    invalidated_count = git_runner.invalidate_cache()
+    assert invalidated_count > 0
+
+    stats_after = git_runner.get_cache_stats()
+    assert stats_after["cached_entries"] == 0
+
+    # Test pattern-based invalidation
+    git_runner.run_git_command(["status", "--porcelain"])
+    git_runner.run_git_command(["log", "--oneline", "-1"])
+
+    pattern_invalidated = git_runner.invalidate_cache(pattern="status")
+    assert pattern_invalidated >= 0
+
+
+def test_repository_scanner_caching(tmp_path):
+    """Test RepositoryScanner file content caching."""
+    from patchdoctor import RepositoryScanner
+
+    # Create test file
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("test content\nline 2\n")
+
+    scanner = RepositoryScanner(repo_path=str(tmp_path))
+
+    # First read
+    content1 = scanner.get_file_content("test.txt")
+    assert content1 is not None
+    assert len(content1) == 2
+
+    # Second read (should be cached)
+    content2 = scanner.get_file_content("test.txt")
+    assert content2 == content1
+
+    # Check cache stats
+    stats = scanner.get_cache_stats()
+    assert "cache_hits" in stats
+    assert "cache_misses" in stats
+    assert stats["total_requests"] >= 2
+    assert stats["cache_hits"] >= 1
+
+    # Test cache clearing
+    cleared_count = scanner.clear_file_cache()
+    assert cleared_count >= 1
+
+
+def test_run_validation_structured_errors(tmp_path):
+    """Test run_validation returns structured error information."""
+    from patchdoctor import run_validation
+
+    # Test with non-existent patch file
+    result = run_validation("nonexistent.patch", repo_path=str(tmp_path))
+
+    assert result["success"] is False
+    assert "error_info" in result
+    error_info = result["error_info"]
+    assert "code" in error_info
+    assert "message" in error_info
+    assert "suggestion" in error_info
+    assert "recoverable" in error_info
+
+
+def test_validate_from_content_structured_errors():
+    """Test validate_from_content with structured error handling."""
+    from patchdoctor import validate_from_content
+
+    # Test with invalid patch content
+    invalid_content = "This is not a valid patch"
+    result = validate_from_content(invalid_content)
+
+    assert result["success"] is False
+    assert "error_info" in result
+    error_info = result["error_info"]
+    assert error_info["code"] in ["PARSE_ERROR", "FILE_NOT_FOUND"]
+    assert error_info["recoverable"] is True
+
+
+def test_summarize_patch_status(tmp_path):
+    """Test patch status summarization for AI agents."""
+    from patchdoctor import (
+        PatchParser, PatchVerifier, VerificationResult,
+        FileVerificationResult, summarize_patch_status
+    )
+
+    # Create a simple patch
+    patch_content = """From: test@example.com
+Subject: Test patch
+
+ test.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/test.txt b/test.txt
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/test.txt
+@@ -0,0 +1 @@
++hello
+"""
+
+    patch_file = tmp_path / "test.patch"
+    patch_file.write_text(patch_content)
+
+    parser = PatchParser()
+    patch_info = parser.parse_patch_file(str(patch_file))
+
+    # Create mock file results
+    file_result = FileVerificationResult(
+        filename="test.txt",
+        verification_status="MISSING",
+        fix_suggestions=[],
+        diff_analysis=None
+    )
+
+    verification_result = VerificationResult(
+        patch_info=patch_info,
+        file_results=[file_result],
+        overall_status="PARTIALLY_APPLIED",
+        success_count=0,
+        total_count=1
+    )
+
+    # Test summarization
+    summary = summarize_patch_status(verification_result)
+
+    assert "overall_status" in summary
+    assert "file_summary" in summary
+    assert "hunk_summary" in summary
+    assert "fix_suggestions" in summary
+    assert "recommendations" in summary
+    assert "completion_percentage" in summary
+
+    assert summary["file_summary"]["total"] == 1
+    assert summary["file_summary"]["missing"] == 1
+    assert summary["completion_percentage"] == 0
+
+
+def test_generate_api_schema():
+    """Test OpenAPI schema generation for AI agents."""
+    from patchdoctor import generate_api_schema
+
+    schema = generate_api_schema()
+
+    assert "openapi" in schema
+    assert schema["openapi"] == "3.0.0"
+
+    assert "info" in schema
+    assert schema["info"]["title"] == "PatchDoctor AI Agent API"
+
+    assert "functions" in schema
+    functions = schema["functions"]
+    assert "run_validation" in functions
+    assert "validate_from_content" in functions
+    assert "apply_safe_fixes" in functions
+    assert "generate_api_schema" in functions
+
+    assert "data_types" in schema
+    data_types = schema["data_types"]
+    assert "ErrorInfo" in data_types
+    assert "VerificationResult" in data_types
+    assert "Config" in data_types
+
+    assert "error_codes" in schema
+    assert "examples" in schema
+    assert "supported_operations" in schema
+
+
+def test_validate_incremental_progress_callback(tmp_path):
+    """Test incremental validation with progress callback."""
+    from patchdoctor import validate_incremental
+
+    # Create multiple patch files
+    patch_content = """From: test@example.com
+Subject: Test patch
+
+ test{}.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/test{}.txt b/test{}.txt
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/test{}.txt
+@@ -0,0 +1 @@
++hello
+"""
+
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+
+    for i in range(3):
+        patch_file = patch_dir / f"test{i}.patch"
+        patch_file.write_text(patch_content.format(i, i, i, i))
+
+    # Track progress callback calls
+    progress_calls = []
+
+    def progress_callback(patch_file: str, result):
+        progress_calls.append((patch_file, result))
+
+    # Test incremental validation
+    result = validate_incremental(
+        str(patch_dir),
+        progress_callback=progress_callback,
+        early_stop_on_error=False,
+        max_concurrent=1,
+        repo_path=str(tmp_path)
+    )
+
+    assert result["success"] is True
+    assert result["processed_count"] == 3
+    assert result["total_count"] == 3
+    assert len(progress_calls) == 3
+
+
+def test_validate_incremental_parallel_processing(tmp_path):
+    """Test incremental validation with parallel processing."""
+    from patchdoctor import validate_incremental
+
+    # Create multiple patch files
+    patch_content = """From: test@example.com
+Subject: Test patch {}
+
+ test{}.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/test{}.txt b/test{}.txt
+new file mode 100644
+index 0000000..e69de29
+--- /dev/null
++++ b/test{}.txt
+@@ -0,0 +1 @@
++hello
+"""
+
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+
+    for i in range(4):
+        patch_file = patch_dir / f"test{i}.patch"
+        patch_file.write_text(patch_content.format(i, i, i, i, i))
+
+    # Test with parallel processing
+    result = validate_incremental(
+        str(patch_dir),
+        max_concurrent=2,  # Use 2 threads
+        repo_path=str(tmp_path)
+    )
+
+    assert result["success"] is True
+    assert result["processed_count"] == 4
+    assert result["total_count"] == 4
+
+
+def test_config_validation():
+    """Test Config validation with various input values."""
+    from patchdoctor import Config
+    import pytest
+
+    # Test valid configuration
+    config = Config(
+        similarity_threshold=0.5,
+        hunk_tolerance=5,
+        timeout=30,
+        max_file_size=100
+    )
+    assert config.similarity_threshold == 0.5
+
+    # Test invalid similarity threshold
+    with pytest.raises(ValueError, match="Similarity threshold must be between 0.0 and 1.0"):
+        Config(similarity_threshold=1.5)
+
+    with pytest.raises(ValueError, match="Similarity threshold must be between 0.0 and 1.0"):
+        Config(similarity_threshold=-0.1)
+
+    # Test invalid hunk tolerance
+    with pytest.raises(ValueError, match="Hunk tolerance must be non-negative"):
+        Config(hunk_tolerance=-1)
+
+    # Test invalid timeout
+    with pytest.raises(ValueError, match="Timeout must be positive"):
+        Config(timeout=0)
+
+    with pytest.raises(ValueError, match="Timeout must be positive"):
+        Config(timeout=-10)
+
+    # Test invalid max file size
+    with pytest.raises(ValueError, match="Max file size must be positive"):
+        Config(max_file_size=0)
+
+
+def test_performance_benchmarks(tmp_path):
+    """Performance benchmarks for new features."""
+    import time
+    from patchdoctor import GitRunner, RepositoryScanner
+
+    # Test GitRunner performance with caching
+    git_runner = GitRunner(
+        repo_path=str(tmp_path),
+        enable_performance_monitoring=True
+    )
+
+    start_time = time.time()
+
+    # Run multiple git commands
+    for _ in range(10):
+        git_runner.run_git_command(["status", "--porcelain"])
+
+    elapsed_time = time.time() - start_time
+
+    # Should be fast due to caching
+    assert elapsed_time < 5.0  # Should complete in under 5 seconds
+
+    stats = git_runner.get_cache_stats()
+    assert stats["cache_hit_ratio"] > 0.5  # Should have good cache hit ratio
+
+    # Test RepositoryScanner performance
+    test_file = tmp_path / "large_test.txt"
+    test_file.write_text("line\n" * 1000)  # 1000 lines
+
+    scanner = RepositoryScanner(repo_path=str(tmp_path))
+
+    start_time = time.time()
+
+    # Read file multiple times
+    for _ in range(10):
+        content = scanner.get_file_content("large_test.txt")
+        assert content is not None
+
+    elapsed_time = time.time() - start_time
+
+    # Should be fast due to caching
+    assert elapsed_time < 2.0
+
+    stats = scanner.get_cache_stats()
+    assert stats["cache_hit_ratio"] > 0.5
