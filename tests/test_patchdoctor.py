@@ -227,6 +227,7 @@ def test_error_info_structure():
     """Test ErrorInfo dataclass structure and functionality."""
     from patchdoctor import ErrorInfo
 
+    # Test normal construction
     error_info = ErrorInfo(
         code="TEST_ERROR",
         message="Test error message",
@@ -242,6 +243,27 @@ def test_error_info_structure():
     assert error_info.context["file"] == "test.txt"
     assert error_info.recoverable is True
     assert error_info.severity == "error"
+
+    # Test with minimal required fields
+    minimal_error = ErrorInfo(
+        code="MIN_ERROR",
+        message="Minimal error",
+        suggestion="Do something"
+    )
+
+    assert minimal_error.code == "MIN_ERROR"
+    assert minimal_error.context == {}  # Should default to empty dict
+    assert minimal_error.recoverable is True  # Should default to True
+    assert minimal_error.severity == "error"  # Should default to "error"
+
+    # Test that default factory works for context
+    error1 = ErrorInfo(code="E1", message="msg1", suggestion="fix1")
+    error2 = ErrorInfo(code="E2", message="msg2", suggestion="fix2")
+
+    # Each should have separate context dicts
+    error1.context["test"] = "value1"
+    error2.context["test"] = "value2"
+    assert error1.context["test"] != error2.context["test"]
 
 
 def test_config_profiles():
@@ -270,10 +292,26 @@ def test_config_profiles():
     assert fast_config.max_file_size == 50
     assert fast_config.patch_dir == "./patches"
 
+    # Test that overrides work
+    custom_strict = Config.strict_mode(similarity_threshold=0.9)
+    assert custom_strict.similarity_threshold == 0.9  # Override should work
+    assert custom_strict.hunk_tolerance == 2  # Other defaults should remain
+
+    # Test profile differences (these should actually be different)
+    assert strict_config.similarity_threshold > lenient_config.similarity_threshold
+    assert strict_config.hunk_tolerance < lenient_config.hunk_tolerance
+    assert fast_config.timeout < strict_config.timeout
+    assert fast_config.max_file_size < lenient_config.max_file_size  # Default max_file_size
+
 
 def test_gitrunner_performance_monitoring(tmp_path):
     """Test GitRunner performance monitoring capabilities."""
     from patchdoctor import GitRunner
+    import subprocess
+    import os
+
+    # Initialize git repo in tmp_path to ensure git commands work
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
 
     # Test with performance monitoring enabled
     git_runner = GitRunner(
@@ -281,28 +319,42 @@ def test_gitrunner_performance_monitoring(tmp_path):
         enable_performance_monitoring=True
     )
 
-    # Run some git commands
+    # Test that performance monitoring is enabled
+    initial_stats = git_runner.get_cache_stats()
+    assert "cache_hits" in initial_stats
+    assert "cache_misses" in initial_stats
+    assert "total_requests" in initial_stats
+    assert initial_stats["total_requests"] == 0
+
+    # Run same git command twice to test caching
     result1 = git_runner.run_git_command(["status", "--porcelain"])
-    result2 = git_runner.run_git_command(["status", "--porcelain"])  # Should be cached
+    result2 = git_runner.run_git_command(["status", "--porcelain"])
 
-    # Check cache stats
+    # Check cache stats after requests
     stats = git_runner.get_cache_stats()
-    assert "cache_hits" in stats
-    assert "cache_misses" in stats
-    assert "total_requests" in stats
-    assert stats["total_requests"] >= 2
+    assert stats["total_requests"] == 2
 
-    # Cache might not work if git commands fail, so check if git worked first
-    if result1.ok and result2.ok:
-        assert stats["cache_hits"] >= 1  # Second request should be cached
+    # At least one command should be cacheable (even if it fails, failed results are cached)
+    # Second command should be cached if first was successful
+    if result1.ok:
+        assert stats["cache_hits"] >= 1, f"Expected cache hit but got stats: {stats}"
+        assert stats["cache_misses"] >= 1, f"Expected cache miss but got stats: {stats}"
     else:
-        # If git commands failed, just check that stats are tracked
-        assert stats["cache_hits"] >= 0
+        # Even failed commands should be tracked
+        assert stats["cache_misses"] >= 1
 
-    # Check performance report
+    # Check performance report structure
     report = git_runner.get_performance_report()
     assert "Performance Report" in report
     assert "Cache Statistics" in report
+
+    # Test with monitoring disabled
+    git_runner_no_monitor = GitRunner(
+        repo_path=str(tmp_path),
+        enable_performance_monitoring=False
+    )
+    report_no_monitor = git_runner_no_monitor.get_performance_report()
+    assert "Performance monitoring is disabled" in report_no_monitor
 
 
 def test_gitrunner_cache_invalidation(tmp_path):
@@ -388,21 +440,40 @@ def test_validate_from_content_structured_errors():
     from patchdoctor import validate_from_content
 
     # Test with completely invalid patch content that will cause parsing to fail
-    invalid_content = ""  # Empty content should fail
+    invalid_content = ""  # Empty content
     result = validate_from_content(invalid_content)
 
-    # Function might succeed but with no files found, so let's test that case
-    if result["success"]:
-        # If it succeeds with empty content, it should have no file results
-        assert "result" in result
-        verification_result = result["result"]
-        assert verification_result["total_count"] == 0
-    else:
-        # If it fails, it should have error_info
-        assert "error_info" in result
-        error_info = result["error_info"]
+    # Empty content should succeed but with no files
+    assert result["success"] is True
+    assert "result" in result
+    verification_result = result["result"]
+    assert verification_result["total_count"] == 0
+
+    # Test with malformed patch content that should cause an error
+    malformed_content = "From: test@example.com\nSubject: Test\n\ndiff --git invalid diff format"
+    try:
+        result2 = validate_from_content(malformed_content)
+        # If it doesn't fail, it should at least process with 0 files or have error info
+        if result2["success"]:
+            # Should have processed with some result
+            assert "result" in result2
+        else:
+            # Should have structured error info
+            assert "error_info" in result2
+            error_info = result2["error_info"]
+            assert "code" in error_info
+            assert error_info["recoverable"] is True
+    except Exception:
+        # If it raises an exception, that's also acceptable for malformed content
+        pass
+
+    # Test with non-existent repo path to force an error
+    result3 = validate_from_content("valid patch content", repo_path="/nonexistent/path/12345")
+    # This should either fail or succeed with appropriate handling
+    if not result3["success"]:
+        assert "error_info" in result3
+        error_info = result3["error_info"]
         assert "code" in error_info
-        assert error_info["recoverable"] is True
 
 
 def test_summarize_patch_status(tmp_path):
@@ -669,3 +740,65 @@ def test_performance_benchmarks(tmp_path):
     stats = scanner.get_cache_stats()
     # File caching should work since we're reading actual files
     assert stats["cache_hit_ratio"] > 0.5
+
+
+def test_failure_scenarios():
+    """Test scenarios that should actually fail to ensure our tests can fail."""
+    from patchdoctor import Config, ErrorInfo
+    import pytest
+
+    # Test that we can actually catch validation errors
+    with pytest.raises(ValueError, match="Similarity threshold must be between 0.0 and 1.0"):
+        Config(similarity_threshold=2.0)
+
+    # Test ErrorInfo with wrong type should fail
+    with pytest.raises(TypeError):
+        ErrorInfo()  # Missing required arguments
+
+    # Test that the API schema has the expected number of functions
+    from patchdoctor import generate_api_schema
+    schema = generate_api_schema()
+    functions = schema["functions"]
+
+    # This will fail if we add/remove functions without updating the test
+    expected_function_count = 10  # Current count of AI agent functions
+    actual_count = len(functions)
+    assert actual_count == expected_function_count, f"Expected {expected_function_count} functions, got {actual_count}. Functions: {list(functions.keys())}"
+
+    # Test that config profiles actually have different values
+    from patchdoctor import Config
+    strict = Config.strict_mode()
+    lenient = Config.lenient_mode()
+    fast = Config.fast_mode()
+
+    # These assertions will fail if profiles become identical
+    assert strict.similarity_threshold != lenient.similarity_threshold, "Strict and lenient should have different similarity thresholds"
+    assert strict.hunk_tolerance != lenient.hunk_tolerance, "Strict and lenient should have different hunk tolerances"
+    assert fast.timeout != strict.timeout, "Fast and strict should have different timeouts"
+
+
+def test_cache_invalidation_actually_works(tmp_path):
+    """Test that cache invalidation actually clears the cache."""
+    from patchdoctor import RepositoryScanner
+
+    # Create test file
+    test_file = tmp_path / "cache_test.txt"
+    test_file.write_text("original content\n")
+
+    scanner = RepositoryScanner(repo_path=str(tmp_path))
+
+    # Read file to populate cache
+    content1 = scanner.get_file_content("cache_test.txt")
+    assert content1 is not None
+
+    # Verify cache has entries
+    stats_before = scanner.get_cache_stats()
+    assert stats_before["cached_files"] > 0, "Cache should have entries after reading file"
+
+    # Clear cache
+    cleared_count = scanner.clear_file_cache()
+    assert cleared_count > 0, "Should have cleared some cache entries"
+
+    # Verify cache is empty
+    stats_after = scanner.get_cache_stats()
+    assert stats_after["cached_files"] == 0, "Cache should be empty after clearing"
