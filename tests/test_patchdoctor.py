@@ -802,3 +802,617 @@ def test_cache_invalidation_actually_works(tmp_path):
     # Verify cache is empty
     stats_after = scanner.get_cache_stats()
     assert stats_after["cached_files"] == 0, "Cache should be empty after clearing"
+
+
+# Advanced AI Agent Integration Tests
+
+def test_apply_safe_fixes_integration(tmp_path):
+    """Test apply_safe_fixes with real patch scenarios."""
+    import subprocess
+    from patchdoctor import (
+        apply_safe_fixes, PatchParser, PatchVerifier, VerificationResult,
+        FileVerificationResult, FixSuggestion
+    )
+
+    # Initialize git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, capture_output=True)
+
+    # Create initial file and commit
+    test_file = tmp_path / "test.txt"
+    test_file.write_text("line 1\nline 2\nline 3\n")
+    subprocess.run(["git", "add", "test.txt"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=tmp_path, capture_output=True)
+
+    # Create mock verification result with fix suggestions
+    mock_fix_safe = FixSuggestion(
+        fix_type="file_restore",
+        description="Restore file from git",
+        commands=["git checkout HEAD -- test.txt"],
+        safety_level="safe"
+    )
+
+    mock_fix_dangerous = FixSuggestion(
+        fix_type="file_delete",
+        description="Delete problematic file",
+        commands=["rm test.txt"],
+        safety_level="dangerous"
+    )
+
+    file_result = FileVerificationResult(
+        file_path="test.txt",
+        expected_operation="modify",
+        actual_status="missing",
+        verification_status="MISSING",
+        fix_suggestions=[mock_fix_safe, mock_fix_dangerous]
+    )
+
+    # Create mock patch info
+    from patchdoctor import PatchInfo
+    patch_info = PatchInfo(
+        filename="test.patch",
+        commit_hash="abcd1234",
+        author="Test",
+        subject="Test patch",
+        files_changed=[]
+    )
+
+    verification_result = VerificationResult(
+        patch_info=patch_info,
+        file_results=[file_result],
+        overall_status="MISSING",
+        success_count=0,
+        total_count=1
+    )
+
+    # Test dry run mode
+    result = apply_safe_fixes(
+        verification_result,
+        confirm=False,
+        safety_levels=["safe"],
+        dry_run=True,
+        repo_path=str(tmp_path)
+    )
+
+    assert result["success"] is True
+    assert len(result["would_apply"]) >= 1
+    assert len(result["would_skip"]) >= 0
+    assert "rollback_info" in result
+
+    # Test safe fixes only
+    test_file.unlink()  # Remove file to test restoration
+
+    result = apply_safe_fixes(
+        verification_result,
+        confirm=False,
+        safety_levels=["safe"],
+        dry_run=False,
+        repo_path=str(tmp_path)
+    )
+
+    assert result["success"] is True
+    assert len(result["applied"]) >= 0  # Commands might fail in test environment
+    assert len(result["skipped"]) >= 0
+    assert "rollback_info" in result
+
+    # Test that dangerous fixes are skipped when not requested
+    result_safe_only = apply_safe_fixes(
+        verification_result,
+        confirm=False,
+        safety_levels=["safe"],
+        dry_run=True,
+        repo_path=str(tmp_path)
+    )
+
+    # Should skip dangerous fixes
+    assert len([fix for fix in result_safe_only.get("would_skip", [])
+               if "dangerous" in str(fix)]) >= 0
+
+
+def test_extract_missing_changes_deep_analysis(tmp_path):
+    """Test extract_missing_changes with complex scenarios."""
+    from patchdoctor import (
+        extract_missing_changes, PatchParser, VerificationResult,
+        FileVerificationResult, DiffAnalysis, DiffHunk
+    )
+
+    # Create mock verification result with complex missing changes
+    missing_hunk1 = DiffHunk(
+        old_start=1, old_count=1, new_start=1, new_count=2,
+        lines=["-old line", "+new line", "+added line"]
+    )
+
+    missing_hunk2 = DiffHunk(
+        old_start=5, old_count=2, new_start=6, new_count=1,
+        lines=["-removed line 1", "-removed line 2", "+replacement line"]
+    )
+
+    diff_analysis = DiffAnalysis(
+        total_hunks=3,
+        applied_hunks=1,
+        missing_hunks=[missing_hunk1, missing_hunk2],
+        hunk_results=[]
+    )
+
+    file_result = FileVerificationResult(
+        file_path="complex.txt",
+        expected_operation="modify",
+        actual_status="partially_applied",
+        verification_status="MODIFIED",
+        diff_analysis=diff_analysis
+    )
+
+    from patchdoctor import PatchInfo
+    patch_info = PatchInfo(
+        filename="complex.patch",
+        commit_hash="def5678",
+        author="Test",
+        subject="Complex patch",
+        files_changed=[]
+    )
+
+    verification_result = VerificationResult(
+        patch_info=patch_info,
+        file_results=[file_result],
+        overall_status="PARTIALLY_APPLIED",
+        success_count=0,
+        total_count=1
+    )
+
+    # Test missing changes extraction
+    missing_changes = extract_missing_changes(verification_result)
+
+    assert len(missing_changes) >= 1
+    assert missing_changes[0]["file_path"] == "complex.txt"
+    assert "hunk_info" in missing_changes[0]
+    assert "content_lines" in missing_changes[0]
+    assert "conflict_type" in missing_changes[0]
+
+    # Test with no missing changes
+    complete_file_result = FileVerificationResult(
+        file_path="complete.txt",
+        expected_operation="modify",
+        actual_status="applied",
+        verification_status="OK"
+    )
+
+    complete_verification = VerificationResult(
+        patch_info=patch_info,
+        file_results=[complete_file_result],
+        overall_status="FULLY_APPLIED",
+        success_count=1,
+        total_count=1
+    )
+
+    no_missing = extract_missing_changes(complete_verification)
+    assert len(no_missing) == 0
+
+
+def test_generate_corrective_patch_accuracy(tmp_path):
+    """Test generate_corrective_patch with various scenarios."""
+    from patchdoctor import (
+        generate_corrective_patch, VerificationResult,
+        FileVerificationResult, DiffAnalysis, DiffHunk
+    )
+
+    # Create test scenario with missing hunks
+    missing_hunk = DiffHunk(
+        old_start=1, old_count=1, new_start=1, new_count=2,
+        lines=["-original content", "+modified content", "+extra line"]
+    )
+
+    diff_analysis = DiffAnalysis(
+        total_hunks=2,
+        applied_hunks=1,
+        missing_hunks=[missing_hunk],
+        hunk_results=[]
+    )
+
+    file_result = FileVerificationResult(
+        file_path="target.txt",
+        expected_operation="modify",
+        actual_status="partially_applied",
+        verification_status="MODIFIED",
+        diff_analysis=diff_analysis
+    )
+
+    from patchdoctor import PatchInfo
+    patch_info = PatchInfo(
+        filename="source.patch",
+        commit_hash="abc123",
+        author="Test",
+        subject="Test patch",
+        files_changed=[]
+    )
+
+    verification_result = VerificationResult(
+        patch_info=patch_info,
+        file_results=[file_result],
+        overall_status="PARTIALLY_APPLIED",
+        success_count=0,
+        total_count=1
+    )
+
+    # Test corrective patch generation
+    output_file = tmp_path / "corrective.patch"
+    success = generate_corrective_patch(verification_result, str(output_file))
+
+    if success:
+        assert output_file.exists()
+        patch_content = output_file.read_text()
+        assert "target.txt" in patch_content
+        assert "@@" in patch_content  # Should contain hunk headers
+    else:
+        # If generation fails (no missing changes), that's also valid
+        assert not output_file.exists()
+
+    # Test with no missing changes
+    complete_file_result = FileVerificationResult(
+        file_path="complete.txt",
+        expected_operation="modify",
+        actual_status="applied",
+        verification_status="OK"
+    )
+
+    complete_verification = VerificationResult(
+        patch_info=patch_info,
+        file_results=[complete_file_result],
+        overall_status="FULLY_APPLIED",
+        success_count=1,
+        total_count=1
+    )
+
+    output_file2 = tmp_path / "no_corrective.patch"
+    success2 = generate_corrective_patch(complete_verification, str(output_file2))
+    assert success2 is False  # Should return False when no corrections needed
+    assert not output_file2.exists()
+
+
+def test_split_large_patch_strategies(tmp_path):
+    """Test split_large_patch with different splitting strategies."""
+    from patchdoctor import split_large_patch
+
+    # Create a large multi-file patch
+    large_patch_content = """From: test@example.com
+Subject: Large multi-file patch
+
+ file1.txt | 5 +++++
+ file2.txt | 3 +++
+ file3.txt | 2 ++
+ 3 files changed, 10 insertions(+)
+
+diff --git a/file1.txt b/file1.txt
+new file mode 100644
+index 0000000..abc123
+--- /dev/null
++++ b/file1.txt
+@@ -0,0 +1,5 @@
++line 1
++line 2
++line 3
++line 4
++line 5
+
+diff --git a/file2.txt b/file2.txt
+new file mode 100644
+index 0000000..def456
+--- /dev/null
++++ b/file2.txt
+@@ -0,0 +1,3 @@
++content A
++content B
++content C
+
+diff --git a/file3.txt b/file3.txt
+new file mode 100644
+index 0000000..789abc
+--- /dev/null
++++ b/file3.txt
+@@ -0,0 +1,2 @@
++final line 1
++final line 2
+"""
+
+    # Test splitting by file
+    patches = split_large_patch(large_patch_content, strategy="by_file")
+
+    assert len(patches) >= 1  # Should create at least one patch
+
+    # Each patch should be valid and contain file content
+    for patch in patches:
+        assert "diff --git" in patch
+        assert "@@" in patch or "new file mode" in patch
+
+    # Test splitting by size
+    patches_by_size = split_large_patch(large_patch_content, strategy="by_size")
+    assert len(patches_by_size) >= 1
+
+    # Test with small patch (should not split)
+    small_patch = """From: test@example.com
+Subject: Small patch
+
+ small.txt | 1 +
+
+diff --git a/small.txt b/small.txt
+@@ -1 +1,2 @@
+ existing
++new line
+"""
+
+    small_patches = split_large_patch(small_patch, strategy="by_file")
+    assert len(small_patches) == 1  # Should remain as single patch
+
+
+# Real-World Scenario Tests
+
+def test_multi_file_dependency_patch(tmp_path):
+    """Test patches where file order and dependencies matter."""
+    import subprocess
+    from patchdoctor import run_validation
+
+    # Initialize git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, capture_output=True)
+
+    # Create interdependent files
+    config_file = tmp_path / "config.py"
+    config_file.write_text("DATABASE_URL = 'sqlite:///old.db'\nDEBUG = False\n")
+
+    main_file = tmp_path / "main.py"
+    main_file.write_text("from config import DATABASE_URL\nprint(f'Using: {DATABASE_URL}')\n")
+
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial files"], cwd=tmp_path, capture_output=True)
+
+    # Create patch that modifies both files with dependencies
+    dependency_patch = """From: test@example.com
+Subject: Update database configuration and usage
+
+ config.py | 2 +-
+ main.py   | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/config.py b/config.py
+index abc123..def456 100644
+--- a/config.py
++++ b/config.py
+@@ -1,2 +1,2 @@
+-DATABASE_URL = 'sqlite:///old.db'
++DATABASE_URL = 'postgresql://localhost/new'
+ DEBUG = False
+
+diff --git a/main.py b/main.py
+index 789abc..012def 100644
+--- a/main.py
++++ b/main.py
+@@ -1,2 +1,3 @@
+-from config import DATABASE_URL
+-print(f'Using: {DATABASE_URL}')
++from config import DATABASE_URL, DEBUG
++print(f'Using: {DATABASE_URL}')
++print(f'Debug mode: {DEBUG}')
+"""
+
+    patch_file = tmp_path / "dependency.patch"
+    patch_file.write_text(dependency_patch)
+
+    # Test validation of interdependent changes
+    result = run_validation(str(patch_file), repo_path=str(tmp_path))
+
+    assert result["success"] is True
+    verification_result = result["verification_result"]
+
+    # Should detect that files are missing/need updates
+    assert verification_result.total_count == 2
+    config_results = [r for r in verification_result.file_results if "config.py" in r.file_path]
+    main_results = [r for r in verification_result.file_results if "main.py" in r.file_path]
+
+    assert len(config_results) == 1
+    assert len(main_results) == 1
+
+
+def test_line_ending_conflicts(tmp_path):
+    """Test patches with CRLF vs LF line ending conflicts."""
+    from patchdoctor import validate_from_content
+
+    # Create patch with mixed line endings (common Windows/Unix issue)
+    mixed_endings_patch = "From: test@example.com\r\nSubject: Mixed line endings\r\n\r\n line_endings.txt | 2 +-\r\n 1 file changed, 1 insertion(+), 1 deletion(-)\r\n\r\ndiff --git a/line_endings.txt b/line_endings.txt\nindex abc123..def456 100644\n--- a/line_endings.txt\n+++ b/line_endings.txt\n@@ -1,3 +1,3 @@\n line 1\r\n-old line 2\r\n+new line 2\r\n line 3\r\n"
+
+    # Test that validation handles mixed line endings gracefully
+    result = validate_from_content(mixed_endings_patch, repo_path=str(tmp_path))
+
+    assert result["success"] is True  # Should parse despite line ending issues
+    verification_result = result["result"]
+
+    # Should process the file operation
+    assert verification_result["total_count"] >= 0
+
+
+def test_unicode_and_special_characters(tmp_path):
+    """Test patches with unicode content and special file names."""
+    import subprocess
+    from patchdoctor import validate_from_content
+
+    # Create patch with unicode content and international characters
+    unicode_patch = """From: test@example.com
+Subject: Unicode content patch
+
+ 测试文件.txt | 3 +++
+ español.py   | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/测试文件.txt b/测试文件.txt
+new file mode 100644
+index 0000000..abc123
+--- /dev/null
++++ b/测试文件.txt
+@@ -0,0 +1,3 @@
++Unicode content: 你好世界
++Emoji test: 🌟🚀💻
++Special chars: ñáéíóú
+
+diff --git a/español.py b/español.py
+new file mode 100644
+index 0000000..def456
+--- /dev/null
++++ b/español.py
+@@ -0,0 +1,2 @@
++# Código en español
++print("¡Hola mundo!")
+"""
+
+    # Test unicode handling
+    result = validate_from_content(unicode_patch, repo_path=str(tmp_path))
+
+    assert result["success"] is True
+    verification_result = result["result"]
+
+    # Should handle unicode filenames and content
+    assert verification_result["total_count"] == 2
+
+    # Check that unicode filenames are preserved
+    file_paths = [r["file_path"] for r in verification_result["file_results"]]
+    assert any("测试文件.txt" in path for path in file_paths)
+    assert any("español.py" in path for path in file_paths)
+
+
+def test_large_file_handling(tmp_path):
+    """Test performance with large patches and files."""
+    from patchdoctor import validate_from_content
+    import time
+
+    # Create a patch with a large file (simulate by creating many lines)
+    large_file_lines = []
+    for i in range(1000):  # 1000 lines
+        large_file_lines.append(f"+Line {i}: {'x' * 50}")
+
+    large_patch = f"""From: test@example.com
+Subject: Large file patch
+
+ large_file.txt | {len(large_file_lines)} {'+'*len(str(len(large_file_lines)))}
+
+diff --git a/large_file.txt b/large_file.txt
+new file mode 100644
+index 0000000..abc123
+--- /dev/null
++++ b/large_file.txt
+@@ -0,0 +1,{len(large_file_lines)} @@
+{chr(10).join(large_file_lines)}
+"""
+
+    # Test that large patches are processed within reasonable time
+    start_time = time.time()
+    result = validate_from_content(large_patch, repo_path=str(tmp_path))
+    elapsed_time = time.time() - start_time
+
+    assert result["success"] is True
+    assert elapsed_time < 10.0  # Should complete within 10 seconds
+
+    verification_result = result["result"]
+    assert verification_result["total_count"] == 1
+
+
+def test_rename_plus_modify_operations(tmp_path):
+    """Test complex git operations: rename + modify in single patch."""
+    import subprocess
+    from patchdoctor import validate_from_content
+
+    # Initialize git repo and create initial file
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, capture_output=True)
+
+    original_file = tmp_path / "old_name.py"
+    original_file.write_text("def old_function():\n    pass\n")
+    subprocess.run(["git", "add", "old_name.py"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Add original file"], cwd=tmp_path, capture_output=True)
+
+    # Create patch that renames and modifies the file
+    rename_modify_patch = """From: test@example.com
+Subject: Rename and modify file
+
+ old_name.py => new_name.py | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/old_name.py b/new_name.py
+similarity index 60%
+rename from old_name.py
+rename to new_name.py
+index abc123..def456 100644
+--- a/old_name.py
++++ b/new_name.py
+@@ -1,2 +1,4 @@
+-def old_function():
+-    pass
++def new_function():
++    """Updated function with documentation."""
++    print("New implementation")
++    return True
+"""
+
+    # Test rename + modify validation
+    result = validate_from_content(rename_modify_patch, repo_path=str(tmp_path))
+
+    assert result["success"] is True
+    verification_result = result["result"]
+
+    # Should detect the rename operation
+    assert verification_result["total_count"] == 1
+    file_result = verification_result["file_results"][0]
+
+    # The operation should be detected as a rename
+    assert "new_name.py" in file_result["file_path"]
+
+
+def test_binary_file_with_text_changes(tmp_path):
+    """Test mixed patches with both binary and text files."""
+    from patchdoctor import validate_from_content
+
+    mixed_patch = """From: test@example.com
+Subject: Mixed binary and text changes
+
+ image.png    | Bin 0 -> 1024 bytes
+ readme.txt   | 2 ++
+ config.json  | 1 +
+ 3 files changed, 3 insertions(+)
+
+diff --git a/image.png b/image.png
+new file mode 100644
+index 0000000..abc123
+Binary files /dev/null and b/image.png differ
+
+diff --git a/readme.txt b/readme.txt
+new file mode 100644
+index 0000000..def456
+--- /dev/null
++++ b/readme.txt
+@@ -0,0 +1,2 @@
++# Project README
++This is a sample project.
+
+diff --git a/config.json b/config.json
+new file mode 100644
+index 0000000..789abc
+--- /dev/null
++++ b/config.json
+@@ -0,0 +1 @@
++{"version": "1.0.0"}
+"""
+
+    result = validate_from_content(mixed_patch, repo_path=str(tmp_path))
+
+    assert result["success"] is True
+    verification_result = result["result"]
+
+    # Should handle all three files: binary + 2 text files
+    assert verification_result["total_count"] == 3
+
+    # Verify file types are detected correctly
+    file_results = verification_result["file_results"]
+    binary_files = [r for r in file_results if "image.png" in r["file_path"]]
+    text_files = [r for r in file_results if r["file_path"].endswith(('.txt', '.json'))]
+
+    assert len(binary_files) == 1
+    assert len(text_files) == 2

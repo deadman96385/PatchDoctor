@@ -67,6 +67,29 @@ uv run patchdoctor.py --show-all-fixes
 - `-T, --timeout INT`: Timeout for git operations in seconds (default: 30)
 - `-M, --max-file-size INT`: Maximum file size to process in MB (default: 100)
 
+## Using as an LLM Tool
+
+PatchDoctor integrates with LLM-based coding assistants like opencode or Claude Code for patch validation workflows. Import functions directly for programmatic use:
+
+```python
+import patchdoctor
+
+# Run validation on patch files
+report = patchdoctor.run_validation(patch_dir=".", json_report_file="report.json")
+print(f"Success rate: {patchdoctor.parse_report_status(report)['success_rate']}")
+
+# Validate a patch from string content
+result = patchdoctor.validate_from_content(patch_string, repo_path=".")
+```
+
+For command-line integration:
+
+```bash
+uv run python -m patchdoctor.py -j report.json
+```
+
+Feed the JSON output to your LLM for analysis or iterative patch application.
+
 ## Examples
 
 ```bash
