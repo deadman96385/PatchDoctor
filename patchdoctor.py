@@ -3009,20 +3009,37 @@ def _determine_conflict_type(file_result: FileVerificationResult, hunk: DiffHunk
 def _split_patch_by_file(patch_content: str) -> List[str]:
     """Split patch by individual files."""
     patches = []
-    current_patch = []
     lines = patch_content.split('\n')
 
-    for line in lines:
-        if line.startswith('diff --git') and current_patch:
-            # Start of new file, save current patch
-            patches.append('\n'.join(current_patch))
-            current_patch = [line]
+    # Find header (everything before first diff --git)
+    header = []
+    diff_start = -1
+    for i, line in enumerate(lines):
+        if line.startswith('diff --git'):
+            diff_start = i
+            break
+        header.append(line)
+
+    if diff_start == -1:
+        # No diff --git found, return original
+        return [patch_content]
+
+    # Split by diff --git sections
+    current_diff = []
+    for i in range(diff_start, len(lines)):
+        line = lines[i]
+        if line.startswith('diff --git') and current_diff:
+            # Start of new file, save current diff with header
+            patch = '\n'.join(header + current_diff)
+            patches.append(patch)
+            current_diff = [line]
         else:
-            current_patch.append(line)
+            current_diff.append(line)
 
     # Add the last patch
-    if current_patch:
-        patches.append('\n'.join(current_patch))
+    if current_diff:
+        patch = '\n'.join(header + current_diff)
+        patches.append(patch)
 
     return patches
 
