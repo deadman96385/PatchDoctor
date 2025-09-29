@@ -173,6 +173,72 @@ result = validate_incremental(
 5. **Validate incrementally**: Process large patch sets piece by piece
 6. **Handle edge cases**: Check for empty directories, invalid patches, permission issues
 
+## OpenCode AI Tools Integration
+
+PatchDoctor provides comprehensive OpenCode tool integration for AI-powered patch management. The `opencode-tools.json` file in the project root exposes all major PatchDoctor functions as OpenCode commands.
+
+### Available Tools
+
+**Core Validation:**
+- `validate-patches` - Comprehensive patch directory validation
+- `validate-patch-content` - Single patch content analysis
+- `validate-incremental` - Large patch set processing with progress tracking
+
+**AI-Powered Analysis:**
+- `summarize-patch` - Generate patch status summaries and recommendations
+- `extract-missing-changes` - Identify and analyze failed changes
+- `generate-corrective-patch` - Create targeted patches for missing hunks
+
+**Safe Fix Application:**
+- `apply-safe-fixes` - Automated fixes with rollback protection
+- `split-large-patch` - Break down complex patches
+
+**Advanced Workflows:**
+- `validate-patch-sequence` - Dependency and conflict analysis
+- `create-application-plan` - Optimal patch application strategy
+- `batch-process-patches` - Large-scale processing with error recovery
+
+### Usage with OpenCode
+
+```bash
+# Set environment variables
+export PATCH_DIR="./my-patches"
+export SAFETY_LEVEL="safe"
+export VERBOSE="true"
+
+# Run validation
+opencode validate-patches
+
+# Apply safe fixes
+opencode apply-safe-fixes
+
+# Process large patch sets
+opencode batch-process-patches
+```
+
+### Configuration
+
+Copy `opencode-tools.json` to your OpenCode configuration:
+
+```bash
+# Global configuration
+cp opencode-tools.json ~/.config/opencode/
+
+# Project-specific configuration
+cp opencode-tools.json ./opencode.json
+```
+
+### Environment Variables
+
+All tools support extensive configuration through environment variables:
+- `PATCH_DIR` - Source patch directory
+- `SAFETY_LEVEL` - Fix safety level (safe/review/dangerous)
+- `MAX_CONCURRENT` - Concurrent processing limit
+- `DRY_RUN` - Preview mode without changes
+- `ROLLBACK_ON_FAILURE` - Automatic rollback on errors
+
+See the root `opencode-tools.json` file for complete variable reference and usage examples.
+
 ## Contributing
 
 When adding new examples:

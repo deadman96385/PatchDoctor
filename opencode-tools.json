@@ -1,0 +1,153 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "description": "PatchDoctor AI Tools for OpenCode - Comprehensive patch validation, analysis, and automated fixes",
+  "command": {
+    "validate-patches": {
+      "template": "Use PatchDoctor to validate all patches in the directory '{env:PATCH_DIR}' with verbose output {env:VERBOSE}. Return structured validation results with error analysis and fix suggestions.",
+      "description": "Run comprehensive patch validation with AI analysis on a directory of patches",
+      "agent": "general-purpose"
+    },
+    "validate-patch-content": {
+      "template": "Use PatchDoctor to validate the patch content provided: '{env:PATCH_CONTENT}' with repository path '{env:REPO_PATH}'. Provide detailed analysis of what applied, what didn't, and why.",
+      "description": "Validate specific patch content with detailed diff analysis",
+      "agent": "general-purpose"
+    },
+    "validate-incremental": {
+      "template": "Use PatchDoctor to process patches incrementally from '{env:PATCH_DIR}' with max concurrent processing of {env:MAX_CONCURRENT} and early stop on error set to {env:EARLY_STOP}. Show progress and provide structured results.",
+      "description": "Process large patch sets incrementally with progress tracking and concurrent processing",
+      "agent": "general-purpose"
+    },
+    "summarize-patch": {
+      "template": "Use PatchDoctor to analyze and summarize the patch status from the validation result. Provide completion percentage, fix suggestions count by safety level, and actionable recommendations.",
+      "description": "Generate AI-powered patch status summary with recommendations",
+      "agent": "general-purpose"
+    },
+    "extract-missing-changes": {
+      "template": "Use PatchDoctor to extract detailed information about missing changes from the validation result. Identify which hunks didn't apply and analyze the root causes with context.",
+      "description": "Analyze what changes didn't apply and identify root causes",
+      "agent": "general-purpose"
+    },
+    "generate-corrective-patch": {
+      "template": "Use PatchDoctor to generate a corrective patch file '{env:OUTPUT_FILE}' containing only the missing changes from the validation result. Create targeted patches for failed hunks.",
+      "description": "Create targeted patches for missing/failed changes",
+      "agent": "general-purpose"
+    },
+    "apply-safe-fixes": {
+      "template": "Use PatchDoctor to apply safe fixes to the validation result with safety level '{env:SAFETY_LEVEL}', dry run mode {env:DRY_RUN}, and confirmation {env:CONFIRM}. Provide rollback information and detailed results.",
+      "description": "Automatically apply safe fixes with rollback protection",
+      "agent": "general-purpose"
+    },
+    "split-large-patch": {
+      "template": "Use PatchDoctor to split the large patch content using strategy '{env:SPLIT_STRATEGY}' (by_file, by_hunk, or by_size). Return multiple smaller, manageable patch files.",
+      "description": "Break down complex patches into manageable pieces",
+      "agent": "general-purpose"
+    },
+    "validate-patch-sequence": {
+      "template": "Use PatchDoctor to analyze patch sequence from '{env:PATCH_FILES}' and identify dependencies, conflicts, and optimal application order. Provide dependency graph and recommendations.",
+      "description": "Analyze patch dependencies and conflicts in sequence",
+      "agent": "general-purpose"
+    },
+    "create-application-plan": {
+      "template": "Use PatchDoctor to create an optimal patch application plan for patches in '{env:PATCH_DIR}' with rollback checkpoints every {env:CHECKPOINT_INTERVAL} patches. Include dependency analysis and risk assessment.",
+      "description": "Generate optimal patch application strategy with checkpoints",
+      "agent": "general-purpose"
+    },
+    "batch-process-patches": {
+      "template": "Use PatchDoctor to batch process patches from '{env:PATCH_DIR}' with rollback on failure {env:ROLLBACK_ON_FAILURE}, max concurrent {env:MAX_CONCURRENT}, and progress tracking. Handle errors gracefully and provide detailed status.",
+      "description": "Handle large patch sets with error recovery and progress tracking",
+      "agent": "general-purpose"
+    },
+    "generate-api-schema": {
+      "template": "Use PatchDoctor to generate the complete API schema for AI integration. Include all function signatures, parameter types, return structures, and error codes with descriptions.",
+      "description": "Output structured schema for AI agent integration",
+      "agent": "general-purpose"
+    },
+    "parse-report-status": {
+      "template": "Use PatchDoctor to parse and extract key metrics from the validation report: total patches, success rate, file statistics, and status breakdown. Provide summary analytics.",
+      "description": "Extract key metrics and analytics from validation reports",
+      "agent": "general-purpose"
+    },
+    "analyze-patch-errors": {
+      "template": "Use PatchDoctor to analyze patch validation errors and provide structured error information with recovery suggestions for error code '{env:ERROR_CODE}' and context '{env:ERROR_CONTEXT}'.",
+      "description": "Analyze and provide recovery suggestions for patch errors",
+      "agent": "general-purpose"
+    },
+    "convert-dict-to-object": {
+      "template": "Use PatchDoctor to convert dictionary validation results to VerificationResult objects for advanced processing. Ensure full data fidelity and validate structure.",
+      "description": "Convert validation dictionaries to objects for advanced operations",
+      "agent": "general-purpose"
+    }
+  },
+  "instructions": [
+    "When using PatchDoctor tools, always check for structured error information in results",
+    "Use safety levels appropriately: 'safe' for automation, 'review' for manual approval, 'dangerous' only with explicit confirmation",
+    "Always prepare rollback mechanisms when applying fixes automatically",
+    "Provide progress feedback for long-running operations",
+    "Handle edge cases: empty directories, malformed patches, permission issues",
+    "Use incremental validation for large patch sets to avoid memory issues",
+    "Validate patch sequences to identify dependency conflicts before application",
+    "Generate corrective patches only for well-understood failure cases",
+    "Monitor git repository state and create checkpoints for batch operations"
+  ],
+  "environment_variables": {
+    "PATCH_DIR": "Directory containing patch files (default: ./patches)",
+    "PATCH_CONTENT": "Raw patch content as string",
+    "REPO_PATH": "Git repository path (default: .)",
+    "VERBOSE": "Enable verbose output (default: false)",
+    "MAX_CONCURRENT": "Maximum concurrent operations (default: 3)",
+    "EARLY_STOP": "Stop on first error (default: false)",
+    "SAFETY_LEVEL": "Fix safety level: safe, review, dangerous (default: safe)",
+    "DRY_RUN": "Dry run mode - show what would be done (default: false)",
+    "CONFIRM": "Require confirmation before applying fixes (default: true)",
+    "SPLIT_STRATEGY": "Patch split strategy: by_file, by_hunk, by_size (default: by_file)",
+    "PATCH_FILES": "Comma-separated list of patch files for sequence analysis",
+    "CHECKPOINT_INTERVAL": "Create rollback checkpoint every N patches (default: 5)",
+    "ROLLBACK_ON_FAILURE": "Rollback all changes on any failure (default: false)",
+    "OUTPUT_FILE": "Output file path for generated patches",
+    "ERROR_CODE": "Specific error code to analyze",
+    "ERROR_CONTEXT": "Additional error context for analysis"
+  },
+  "usage_examples": {
+    "basic_validation": {
+      "description": "Validate patches in current directory",
+      "command": "opencode validate-patches",
+      "environment": {
+        "PATCH_DIR": "./patches",
+        "VERBOSE": "true"
+      }
+    },
+    "safe_fix_application": {
+      "description": "Apply only safe fixes with rollback protection",
+      "command": "opencode apply-safe-fixes",
+      "environment": {
+        "SAFETY_LEVEL": "safe",
+        "DRY_RUN": "false",
+        "CONFIRM": "false"
+      }
+    },
+    "batch_processing": {
+      "description": "Process large patch set with error recovery",
+      "command": "opencode batch-process-patches",
+      "environment": {
+        "PATCH_DIR": "./large-patchset",
+        "MAX_CONCURRENT": "5",
+        "ROLLBACK_ON_FAILURE": "true"
+      }
+    },
+    "patch_analysis": {
+      "description": "Analyze patch dependencies and create application plan",
+      "command": "opencode create-application-plan",
+      "environment": {
+        "PATCH_DIR": "./complex-patches",
+        "CHECKPOINT_INTERVAL": "3"
+      }
+    }
+  },
+  "integration_notes": {
+    "python_import": "from patchdoctor import run_validation, apply_safe_fixes, summarize_patch_status",
+    "error_handling": "All tools return structured error information with 'error_info' containing code, message, suggestion, and context",
+    "output_format": "Tools return JSON-compatible dictionaries for easy AI agent consumption",
+    "dependencies": "Requires: python 3.10+, git, rich, chardet, cachetools",
+    "safety": "Tools follow defensive security practices - no credential harvesting or malicious operations"
+  }
+}

@@ -67,28 +67,115 @@ uv run patchdoctor.py --show-all-fixes
 - `-T, --timeout INT`: Timeout for git operations in seconds (default: 30)
 - `-M, --max-file-size INT`: Maximum file size to process in MB (default: 100)
 
-## Using as an LLM Tool
+## AI Agent Integration
 
-PatchDoctor integrates with LLM-based coding assistants like opencode or Claude Code for patch validation workflows. Import functions directly for programmatic use:
+### OpenCode Tools
 
-```python
-import patchdoctor
+PatchDoctor provides comprehensive [OpenCode](https://opencode.ai) integration with 15 AI-powered commands for automated patch management. The `opencode-tools.json` file exposes all major PatchDoctor functions through a standardized tool interface.
 
-# Run validation on patch files
-report = patchdoctor.run_validation(patch_dir=".", json_report_file="report.json")
-print(f"Success rate: {patchdoctor.parse_report_status(report)['success_rate']}")
-
-# Validate a patch from string content
-result = patchdoctor.validate_from_content(patch_string, repo_path=".")
-```
-
-For command-line integration:
+#### Quick Setup
 
 ```bash
-uv run python -m patchdoctor.py -j report.json
+# Copy to global OpenCode configuration
+cp opencode-tools.json ~/.config/opencode/
+
+# Or use project-specific configuration
+cp opencode-tools.json ./opencode.json
+
+# Set environment variables
+export PATCH_DIR="./patches"
+export SAFETY_LEVEL="safe"
+export VERBOSE="true"
 ```
 
-Feed the JSON output to your LLM for analysis or iterative patch application.
+#### Available Commands
+
+**Core Validation:**
+- `opencode validate-patches` - Comprehensive patch directory validation
+- `opencode validate-patch-content` - Single patch analysis with detailed diff
+- `opencode validate-incremental` - Large patch set processing with progress tracking
+
+**AI-Powered Analysis:**
+- `opencode summarize-patch` - Generate status summaries and recommendations
+- `opencode extract-missing-changes` - Identify and analyze failed changes
+- `opencode generate-corrective-patch` - Create targeted patches for missing hunks
+
+**Safe Fix Application:**
+- `opencode apply-safe-fixes` - Automated fixes with rollback protection
+- `opencode split-large-patch` - Break down complex patches into manageable pieces
+
+**Advanced Workflows:**
+- `opencode validate-patch-sequence` - Analyze dependencies and conflicts
+- `opencode create-application-plan` - Generate optimal patch application strategy
+- `opencode batch-process-patches` - Large-scale processing with error recovery
+
+#### Environment Configuration
+
+All tools support extensive configuration through environment variables:
+
+```bash
+export PATCH_DIR="./my-patches"        # Source patch directory
+export SAFETY_LEVEL="safe"             # Fix safety: safe/review/dangerous
+export MAX_CONCURRENT="5"              # Concurrent processing limit
+export DRY_RUN="false"                 # Preview mode without changes
+export ROLLBACK_ON_FAILURE="true"      # Automatic rollback on errors
+export VERBOSE="true"                  # Detailed output
+```
+
+#### Usage Examples
+
+```bash
+# Validate patches with detailed analysis
+PATCH_DIR="./patches" VERBOSE="true" opencode validate-patches
+
+# Apply only safe fixes with rollback protection
+SAFETY_LEVEL="safe" DRY_RUN="false" opencode apply-safe-fixes
+
+# Process large patch sets with error recovery
+PATCH_DIR="./large-patchset" MAX_CONCURRENT="5" ROLLBACK_ON_FAILURE="true" opencode batch-process-patches
+
+# Analyze patch dependencies and create application plan
+PATCH_DIR="./complex-patches" CHECKPOINT_INTERVAL="3" opencode create-application-plan
+```
+
+### Python API Integration
+
+For direct programmatic use with LLM-based coding assistants:
+
+```python
+from patchdoctor import run_validation, apply_safe_fixes, summarize_patch_status
+
+# Run validation on patch files
+result = run_validation(patch_dir="./patches", verbose=False)
+print(f"Success rate: {result['success_rate']}")
+
+# Apply safe fixes automatically (auto-detects dict vs object input)
+fix_result = apply_safe_fixes(
+    verification_result=result["results"][0],  # Handles dict input automatically
+    safety_levels=["safe"],
+    confirm=False  # No prompts for automation
+)
+
+# Generate AI-friendly status summary
+summary = summarize_patch_status(result["results"][0])
+print(f"Completion: {summary['completion_percentage']}%")
+```
+
+### Command-Line Integration
+
+```bash
+# Generate JSON output for AI agent consumption
+uv run patchdoctor.py -j report.json
+
+# Process with structured error information
+uv run python -c "
+import patchdoctor
+result = patchdoctor.run_validation(patch_dir='./patches')
+for error in result.get('errors', []):
+    print(f'Error: {error['error_info']['message']}')
+    print(f'Suggestion: {error['error_info']['suggestion']}')
+"
+```
 
 ## Examples
 
