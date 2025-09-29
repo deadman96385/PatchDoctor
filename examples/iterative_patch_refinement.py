@@ -29,7 +29,7 @@ try:
     from patchdoctor import (
         validate_from_content, split_large_patch, apply_safe_fixes,
         extract_missing_changes, generate_corrective_patch, summarize_patch_status,
-        ErrorInfo, ERROR_PARSE_ERROR, ERROR_GIT_COMMAND_FAILED
+        validate_input_for_fixes, ErrorInfo, ERROR_PARSE_ERROR, ERROR_GIT_COMMAND_FAILED
     )
 except ImportError:
     print("Error: Could not import PatchDoctor. Please ensure it's installed and in your Python path.")
@@ -138,53 +138,87 @@ class IterativePatchProcessor:
                     "patch_index": patch_index
                 }
 
-            # Analyze validation result
-            validation_result = result["result"]
-            summary = summarize_patch_status(validation_result)
+            # Analyze validation result (result is a dict, not object)
+            validation_result_dict = result["result"]
 
-            self.log_progress(f"  Status: {summary['overall_status']}", "info")
-            self.log_progress(f"  Files: {summary['file_summary']['ok']}/{summary['file_summary']['total']} OK", "info")
+            # Extract basic status information from dict
+            overall_status = validation_result_dict.get("overall_status", "UNKNOWN")
+            success_count = validation_result_dict.get("success_count", 0)
+            total_count = validation_result_dict.get("total_count", 0)
+            completion_percentage = (success_count / total_count * 100) if total_count > 0 else 0
 
-            if summary["completion_percentage"] == 100:
+            self.log_progress(f"  Status: {overall_status}", "info")
+            self.log_progress(f"  Files: {success_count}/{total_count} OK", "info")
+
+            if completion_percentage == 100:
                 self.log_progress(f"  ✅ Patch {patch_index + 1} fully applied", "success")
                 return {
                     "success": True,
                     "status": "fully_applied",
-                    "summary": summary,
+                    "completion_percentage": completion_percentage,
                     "patch_index": patch_index
                 }
 
             # Handle partial application
-            if summary["completion_percentage"] > 0:
-                self.log_progress(f"  🟡 Patch {patch_index + 1} partially applied ({summary['completion_percentage']:.1f}%)", "warning")
+            if completion_percentage > 0:
+                self.log_progress(f"  🟡 Patch {patch_index + 1} partially applied ({completion_percentage:.1f}%)", "warning")
 
-                # Try to apply safe fixes
-                if not self.dry_run and summary["fix_suggestions"]["safe"] > 0:
-                    self.log_progress(f"  Attempting to apply {summary['fix_suggestions']['safe']} safe fixes...", "info")
-                    # Note: This would require VerificationResult reconstruction in practice
-                    self.log_progress("  [Simulated] Safe fixes applied", "success")
+                # Count available fixes from dict data
+                safe_fixes = 0
+                for file_result in validation_result_dict.get("file_results", []):
+                    for fix in file_result.get("fix_suggestions", []):
+                        if fix.get("safety_level") == "safe":
+                            safe_fixes += 1
+
+                if not self.dry_run and safe_fixes > 0:
+                    self.log_progress(f"  Attempting to apply {safe_fixes} safe fixes...", "info")
+
+                    # Apply fixes using auto-detecting apply_safe_fixes function
+                    fix_result = apply_safe_fixes(
+                        verification_result=validation_result_dict,
+                        confirm=False,
+                        safety_levels=["safe"],
+                        dry_run=False,
+                        repo_path=self.repo_path
+                    )
+
+                    applied = len(fix_result.get("applied", []))
+                    errors = len(fix_result.get("errors", []))
+
+                    if applied > 0:
+                        self.log_progress(f"  ✅ Applied {applied} safe fixes successfully", "success")
+                    if errors > 0:
+                        self.log_progress(f"  ⚠️  {errors} fixes failed to apply", "warning")
 
                 return {
                     "success": True,
                     "status": "partially_applied",
-                    "summary": summary,
+                    "completion_percentage": completion_percentage,
                     "patch_index": patch_index
                 }
 
             else:
                 self.log_progress(f"  🔴 Patch {patch_index + 1} not applied", "error")
 
-                # Generate corrective patch for missing changes
-                missing_changes = extract_missing_changes(validation_result)
-                if missing_changes:
-                    corrective_file = f"corrective_patch_{patch_index + 1}.patch"
-                    if generate_corrective_patch(validation_result, corrective_file):
-                        self.log_progress(f"  Generated corrective patch: {corrective_file}", "info")
+                # Try to generate corrective patches using patch analysis functionality
+                file_results = validation_result_dict.get("file_results", [])
+                if file_results:
+                    try:
+                        # Convert to object for corrective patch generation functions
+                        verification_obj = validate_input_for_fixes(validation_result_dict)
+                        missing_changes = extract_missing_changes(verification_obj)
+
+                        if missing_changes:
+                            corrective_file = f"corrective_patch_{patch_index + 1}.patch"
+                            if generate_corrective_patch(verification_obj, corrective_file):
+                                self.log_progress(f"  📝 Generated corrective patch: {corrective_file}", "info")
+                    except Exception as e:
+                        self.log_progress(f"  Note: Could not generate corrective patch: {e}", "warning")
 
                 return {
                     "success": False,
                     "status": "not_applied",
-                    "summary": summary,
+                    "completion_percentage": completion_percentage,
                     "patch_index": patch_index
                 }
 

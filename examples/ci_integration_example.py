@@ -166,7 +166,8 @@ class CIPatchValidator:
                 progress_callback=progress_callback,
                 early_stop_on_error=False,  # Continue processing in CI for complete results
                 max_concurrent=max_concurrent,
-                timeout=min(30, self.timeout // 4)  # Individual patch timeout
+                timeout=min(30, self.timeout // 4),  # Individual patch timeout
+                verbose=False
             )
 
             validation_time = time.time() - validation_start
@@ -256,8 +257,12 @@ class CIPatchValidator:
 
         # Add test cases for each patch
         for i, patch_result in enumerate(result.get("results", [])):
-            patch_name = patch_result.get("patch_info", {}).get("filename", f"patch_{i}")
-            status = patch_result.get("overall_status", "UNKNOWN")
+            if isinstance(patch_result, dict):
+                patch_name = patch_result.get("patch_info", {}).get("filename", f"patch_{i}")
+                status = patch_result.get("overall_status", "UNKNOWN")
+            else:
+                patch_name = f"patch_{i}"
+                status = "UNKNOWN"
 
             if status == "FULLY_APPLIED":
                 xml_lines.append(f'  <testcase name="{patch_name}" classname="patch-validation" time="0.1"/>')

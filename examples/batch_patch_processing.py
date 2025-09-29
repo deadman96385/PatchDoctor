@@ -214,7 +214,8 @@ class BatchPatchProcessor:
                 progress_callback=self.progress_callback,
                 early_stop_on_error=rollback_on_failure,
                 max_concurrent=self.max_concurrent,
-                repo_path=self.repo_path
+                repo_path=self.repo_path,
+                verbose=False
             )
 
             # Step 4: Analyze results

@@ -2435,10 +2435,269 @@ def parse_report_status(report: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ===== AI AGENT INTEGRATION: Dict/Object Conversion Utilities =====
+
+def _dict_to_diff_hunk(hunk_dict: Dict[str, Any]) -> DiffHunk:
+    """Convert dictionary to DiffHunk object."""
+    return DiffHunk(
+        old_start=hunk_dict.get("old_start", 0),
+        old_count=hunk_dict.get("old_count", 0),
+        new_start=hunk_dict.get("new_start", 0),
+        new_count=hunk_dict.get("new_count", 0),
+        content=hunk_dict.get("content", "")
+    )
+
+
+def _dict_to_file_operation(op_dict: Dict[str, Any]) -> FileOperation:
+    """Convert dictionary to FileOperation object."""
+    return FileOperation(
+        operation=op_dict.get("operation", "unknown"),
+        old_path=op_dict.get("old_path"),
+        new_path=op_dict.get("new_path"),
+        insertions=op_dict.get("insertions", 0),
+        deletions=op_dict.get("deletions", 0)
+    )
+
+
+def _validate_dict_structure(data: Dict[str, Any], required_keys: List[str], context: str = "") -> None:
+    """Validate that dictionary has required structure."""
+    missing = [key for key in required_keys if key not in data]
+    if missing:
+        raise ValueError(f"Missing required keys in {context}: {missing}")
+
+
+def _validate_verification_result_schema(data: Dict[str, Any]) -> None:
+    """Comprehensive validation of verification result dictionary schema.
+
+    Args:
+        data: Dictionary to validate
+
+    Raises:
+        ValueError: If schema validation fails
+        TypeError: If data types are incorrect
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"Expected dict, got {type(data).__name__}")
+
+    # Validate top-level structure
+    _validate_dict_structure(data, ["patch_info", "file_results"], "VerificationResult")
+
+    # Validate patch_info structure
+    patch_info = data["patch_info"]
+    if not isinstance(patch_info, dict):
+        raise TypeError(f"patch_info must be dict, got {type(patch_info).__name__}")
+
+    # Validate file_results structure
+    file_results = data["file_results"]
+    if not isinstance(file_results, list):
+        raise TypeError(f"file_results must be list, got {type(file_results).__name__}")
+
+    # Validate each file result
+    for i, file_result in enumerate(file_results):
+        if not isinstance(file_result, dict):
+            raise TypeError(f"file_results[{i}] must be dict, got {type(file_result).__name__}")
+
+        # Check for expected keys in file result
+        expected_file_keys = ["file_path", "verification_status"]
+        missing = [key for key in expected_file_keys if key not in file_result]
+        if missing:
+            raise ValueError(f"Missing required keys in file_results[{i}]: {missing}")
+
+        # Validate fix_suggestions if present
+        if "fix_suggestions" in file_result:
+            fix_suggestions = file_result["fix_suggestions"]
+            if not isinstance(fix_suggestions, list):
+                raise TypeError(f"fix_suggestions in file_results[{i}] must be list")
+
+            for j, fix in enumerate(fix_suggestions):
+                if not isinstance(fix, dict):
+                    raise TypeError(f"fix_suggestions[{j}] in file_results[{i}] must be dict")
+
+                # Validate safety_level
+                if "safety_level" in fix and fix["safety_level"] not in ["safe", "review", "dangerous"]:
+                    raise ValueError(f"Invalid safety_level '{fix['safety_level']}' in fix_suggestions[{j}]")
+
+        # Validate diff_analysis if present
+        if "diff_analysis" in file_result and file_result["diff_analysis"] is not None:
+            diff_analysis = file_result["diff_analysis"]
+            if not isinstance(diff_analysis, dict):
+                raise TypeError(f"diff_analysis in file_results[{i}] must be dict")
+
+    # Validate status values
+    valid_statuses = ["FULLY_APPLIED", "PARTIALLY_APPLIED", "NOT_APPLIED", "ERROR", "UNKNOWN"]
+    overall_status = data.get("overall_status")
+    if overall_status and overall_status not in valid_statuses:
+        raise ValueError(f"Invalid overall_status '{overall_status}', must be one of {valid_statuses}")
+
+    # Validate numeric fields
+    for field in ["success_count", "total_count"]:
+        if field in data and not isinstance(data[field], int):
+            raise TypeError(f"{field} must be int, got {type(data[field]).__name__}")
+
+
+def validate_input_for_fixes(verification_result: Union[VerificationResult, Dict[str, Any]]) -> VerificationResult:
+    """Validate and normalize input for fix application functions.
+
+    Args:
+        verification_result: Input to validate (dict or VerificationResult)
+
+    Returns:
+        VerificationResult object ready for fix application
+
+    Raises:
+        ValueError: If validation fails
+        TypeError: If input type is invalid
+    """
+    if isinstance(verification_result, VerificationResult):
+        return verification_result
+    elif isinstance(verification_result, dict):
+        # Validate schema before conversion
+        _validate_verification_result_schema(verification_result)
+        return dict_to_verification_result(verification_result)
+    else:
+        raise TypeError(f"Expected VerificationResult or dict, got {type(verification_result).__name__}")
+
+
+def dict_to_verification_result(data: Dict[str, Any]) -> VerificationResult:
+    """Convert dictionary representation back to VerificationResult object with full fidelity.
+
+    This enables object-based fix application and other advanced features
+    that require actual dataclass instances. Performs complete reconstruction
+    of all nested objects including DiffHunks and FileOperations.
+
+    Args:
+        data: Dictionary representation from run_validation() or validate_from_content()
+
+    Returns:
+        VerificationResult object that can be used with apply_safe_fixes()
+
+    Raises:
+        ValueError: If the dictionary structure is invalid or missing required data
+        TypeError: If data types don't match expected types
+    """
+    if not isinstance(data, dict):
+        raise TypeError(f"Expected dict, got {type(data).__name__}")
+
+    # Validate top-level structure
+    _validate_dict_structure(data, ["patch_info", "file_results"], "VerificationResult")
+
+    # Convert patch_info with validation
+    patch_info_dict = data["patch_info"]
+    if not isinstance(patch_info_dict, dict):
+        raise TypeError(f"patch_info must be dict, got {type(patch_info_dict).__name__}")
+
+    # Convert files_changed with full FileOperation objects
+    files_changed = []
+    for op_dict in patch_info_dict.get("files_changed", []):
+        if isinstance(op_dict, dict):
+            files_changed.append(_dict_to_file_operation(op_dict))
+        else:
+            # Handle legacy simple format or create minimal FileOperation
+            files_changed.append(FileOperation(
+                operation="modify",
+                new_path=str(op_dict) if op_dict else "unknown"
+            ))
+
+    patch_info = PatchInfo(
+        filename=patch_info_dict.get("filename", "unknown"),
+        commit_hash=patch_info_dict.get("commit_hash", ""),
+        author=patch_info_dict.get("author", ""),
+        subject=patch_info_dict.get("subject", ""),
+        date=patch_info_dict.get("date"),
+        files_changed=files_changed,
+        total_insertions=patch_info_dict.get("total_insertions", 0),
+        total_deletions=patch_info_dict.get("total_deletions", 0)
+    )
+
+    # Convert file_results with full object reconstruction
+    file_results = []
+    file_results_list = data["file_results"]
+    if not isinstance(file_results_list, list):
+        raise TypeError(f"file_results must be list, got {type(file_results_list).__name__}")
+
+    for fr_dict in file_results_list:
+        if not isinstance(fr_dict, dict):
+            raise TypeError(f"file_result must be dict, got {type(fr_dict).__name__}")
+
+        # Convert fix_suggestions
+        fix_suggestions = []
+        for fix_dict in fr_dict.get("fix_suggestions", []):
+            if not isinstance(fix_dict, dict):
+                continue
+            fix_suggestion = FixSuggestion(
+                fix_type=fix_dict.get("fix_type", "unknown"),
+                description=fix_dict.get("description", ""),
+                commands=fix_dict.get("commands", []),
+                manual_instructions=fix_dict.get("manual_instructions", ""),
+                mini_patch_content=fix_dict.get("mini_patch_content", ""),
+                safety_level=fix_dict.get("safety_level", "safe"),
+                confidence=float(fix_dict.get("confidence", 1.0))
+            )
+            fix_suggestions.append(fix_suggestion)
+
+        # Convert diff_analysis with complete DiffHunk reconstruction
+        diff_analysis = None
+        da_dict = fr_dict.get("diff_analysis")
+        if da_dict and isinstance(da_dict, dict):
+            # Convert missing_hunks
+            missing_hunks = []
+            for hunk_dict in da_dict.get("missing_hunks", []):
+                if isinstance(hunk_dict, dict):
+                    missing_hunks.append(_dict_to_diff_hunk(hunk_dict))
+
+            # Convert applied_hunks
+            applied_hunks = []
+            for hunk_dict in da_dict.get("applied_hunks", []):
+                if isinstance(hunk_dict, dict):
+                    applied_hunks.append(_dict_to_diff_hunk(hunk_dict))
+
+            diff_analysis = DiffAnalysis(
+                missing_hunks=missing_hunks,
+                applied_hunks=applied_hunks,
+                conflicting_lines=da_dict.get("conflicting_lines", []),
+                total_hunks=da_dict.get("total_hunks", 0),
+                file_content=da_dict.get("file_content")
+            )
+
+        file_result = FileVerificationResult(
+            file_path=fr_dict.get("file_path", ""),
+            expected_operation=fr_dict.get("expected_operation", "unknown"),
+            actual_status=fr_dict.get("actual_status", "unknown"),
+            verification_status=fr_dict.get("verification_status", "UNKNOWN"),
+            details=fr_dict.get("details", ""),
+            diff_analysis=diff_analysis,
+            fix_suggestions=fix_suggestions
+        )
+        file_results.append(file_result)
+
+    return VerificationResult(
+        patch_info=patch_info,
+        file_results=file_results,
+        overall_status=data.get("overall_status", "UNKNOWN"),
+        success_count=data.get("success_count", 0),
+        total_count=data.get("total_count", 0)
+    )
+
+
+def dict_to_patch_info(data: Dict[str, Any]) -> PatchInfo:
+    """Convert dictionary representation to PatchInfo object."""
+    return PatchInfo(
+        filename=data.get("filename", "unknown"),
+        commit_hash=data.get("commit_hash", ""),
+        author=data.get("author", ""),
+        subject=data.get("subject", ""),
+        date=data.get("date"),
+        files_changed=[],  # Simplified conversion
+        total_insertions=data.get("total_insertions", 0),
+        total_deletions=data.get("total_deletions", 0)
+    )
+
+
+
 # ===== AI AGENT INTEGRATION: Safe Fix Application =====
 
 def apply_safe_fixes(
-    verification_result: VerificationResult,
+    verification_result: Union[VerificationResult, Dict[str, Any]],
     confirm: bool = True,
     safety_levels: List[str] = None,
     dry_run: bool = False,
@@ -2446,8 +2705,11 @@ def apply_safe_fixes(
 ) -> Dict[str, Any]:
     """Apply fix suggestions based on safety level with rollback support.
 
+    Automatically handles both VerificationResult objects and dictionary inputs
+    from run_validation() or validate_from_content().
+
     Args:
-        verification_result: Result from patch verification
+        verification_result: Result from patch verification (object or dict)
         confirm: Whether to prompt for confirmation before applying fixes
         safety_levels: List of safety levels to apply ("safe", "review", "dangerous")
         dry_run: If True, show what would be done without making changes
@@ -2455,7 +2717,32 @@ def apply_safe_fixes(
 
     Returns:
         Dict with applied, skipped, and failed fixes, plus rollback info
+
+    Raises:
+        TypeError: If verification_result is neither dict nor VerificationResult
+        ValueError: If dict structure is invalid
     """
+    # Validate and normalize input with comprehensive error handling
+    try:
+        verification_result = validate_input_for_fixes(verification_result)
+    except (ValueError, TypeError) as e:
+        return {
+            "applied": [],
+            "skipped": [],
+            "errors": [{
+                "error": str(e),
+                "error_info": asdict(ErrorInfo(
+                    code="INPUT_VALIDATION_ERROR",
+                    message=f"Input validation failed: {e}",
+                    suggestion="Ensure the input has the correct structure from run_validation() or validate_from_content()",
+                    context={"error_type": type(e).__name__},
+                    recoverable=False,
+                    severity="error"
+                ))
+            }],
+            "rollback_info": {"git_stash_id": None, "original_branch": None},
+            "summary": f"Input validation failed: {e}"
+        }
     if safety_levels is None:
         safety_levels = ["safe"]
 

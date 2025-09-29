@@ -121,10 +121,8 @@ def analyze_validation_results(result: Dict[str, Any]) -> Dict[str, Any]:
     return analysis
 
 
-def apply_safe_fixes_workflow(results: list, dry_run: bool = False) -> Dict[str, Any]:
-    """Apply safe fixes to validation results."""
-    from patchdoctor import VerificationResult
-
+def apply_safe_fixes_workflow(results: list, dry_run: bool = False, repo_path: str = ".") -> Dict[str, Any]:
+    """Apply safe fixes to validation results using auto-detecting function."""
     print_progress("Analyzing fix suggestions across all patches...", "info")
 
     total_applied = 0
@@ -132,9 +130,7 @@ def apply_safe_fixes_workflow(results: list, dry_run: bool = False) -> Dict[str,
     total_errors = 0
 
     for result_dict in results:
-        # Convert dict back to VerificationResult for apply_safe_fixes
         try:
-            # This is a simplified conversion - in practice you'd need proper deserialization
             print_progress(f"Processing fixes for patch: {result_dict.get('patch_info', {}).get('filename', 'unknown')}", "info")
 
             # Count available fixes
@@ -148,12 +144,28 @@ def apply_safe_fixes_workflow(results: list, dry_run: bool = False) -> Dict[str,
 
             print_progress(f"  Found {fix_count} potential fixes", "info")
 
+            # Use apply_safe_fixes which now auto-detects dict vs object inputs
+            fix_result = apply_safe_fixes(
+                verification_result=result_dict,
+                confirm=False,  # No prompts in automated workflow
+                safety_levels=["safe"],
+                dry_run=dry_run,
+                repo_path=repo_path
+            )
+
+            # Count results
+            applied = len(fix_result.get("applied", []))
+            skipped = len(fix_result.get("skipped", []))
+            errors = len(fix_result.get("errors", []))
+
+            total_applied += applied
+            total_skipped += skipped
+            total_errors += errors
+
             if dry_run:
-                print_progress(f"  [DRY RUN] Would attempt to apply {fix_count} safe fixes", "info")
-                total_applied += fix_count
+                print_progress(f"  [DRY RUN] Would apply {applied} fixes, skip {skipped}", "info")
             else:
-                print_progress("  Fix application would require VerificationResult object reconstruction", "warning")
-                total_skipped += fix_count
+                print_progress(f"  Applied {applied} fixes, skipped {skipped}, {errors} errors", "info")
 
         except Exception as e:
             print_progress(f"  Error processing fixes: {e}", "error")
@@ -230,7 +242,8 @@ def main():
 
         fix_result = apply_safe_fixes_workflow(
             result.get("results", []),
-            dry_run=args.dry_run
+            dry_run=args.dry_run,
+            repo_path="."
         )
         print_progress(f"Fix application: {fix_result['summary']}", "info")
 

@@ -39,7 +39,7 @@ All examples demonstrate proper use of PatchDoctor's structured error handling:
 ```python
 from patchdoctor import run_validation, ErrorInfo, ERROR_NO_PATCHES_FOUND
 
-result = run_validation(patch_dir="./patches")
+result = run_validation(patch_dir="./patches", verbose=False)
 if not result["success"]:
     error_info = result.get("error_info")
     if error_info and error_info["code"] == ERROR_NO_PATCHES_FOUND:
@@ -56,23 +56,30 @@ Examples show how to use progress callbacks for long-running operations:
 
 ```python
 def progress_callback(patch_file, result):
-    print(f"Processed {patch_file}: {result.overall_status}")
+    status = getattr(result, 'overall_status', 'UNKNOWN') if result else 'FAILED'
+    print(f"Processed {patch_file}: {status}")
 
 result = validate_incremental(
     patch_dir="./patches",
-    progress_callback=progress_callback
+    progress_callback=progress_callback,
+    max_concurrent=1,
+    verbose=False
 )
 ```
 
 ## Safety and Rollback
 
-Examples demonstrate safe fix application with rollback capabilities:
+Examples demonstrate safe fix application with rollback capabilities and automatic input type detection:
 
 ```python
-from patchdoctor import apply_safe_fixes
+from patchdoctor import apply_safe_fixes, run_validation
 
+# Get validation results as dict
+result = run_validation(patch_dir="./patches", verbose=False)
+
+# Apply fixes directly from dict results (automatic detection and conversion)
 fix_result = apply_safe_fixes(
-    verification_result,
+    verification_result=result["results"][0],  # First patch result
     safety_levels=["safe"],
     dry_run=False,
     confirm=False  # For AI automation
@@ -87,9 +94,20 @@ if rollback_info["git_stash_id"]:
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.10+
 - PatchDoctor (with AI agent integration features)
 - Git repository for testing
+- Dependencies: `rich`, `chardet`, `cachetools`
+
+## Installation
+
+```bash
+# Install dependencies
+pip install rich chardet cachetools
+
+# Or use uv for development
+uv pip install -e ".[dev]"
+```
 
 ## Running Examples
 
@@ -112,16 +130,16 @@ python examples/ci_integration_example.py --json-output results.json
 ### 1. Validation-First Pattern
 ```python
 # Validate first, then decide on fixes
-result = run_validation(patch_dir="patches")
+result = run_validation(patch_dir="patches", verbose=False)
 if result["success"]:
     # Process successful validation
-    pass
+    print(f"Successfully validated {result.get('total_patches', 0)} patches")
 else:
     # Analyze errors and apply fixes
-    for error in result["errors"]:
-        if error["recoverable"]:
+    for error in result.get("errors", []):
+        if error.get("recoverable", False):
             # Apply automated recovery
-            pass
+            print(f"Recoverable error: {error.get('message', 'Unknown')}")
 ```
 
 ### 2. Progressive Refinement Pattern
@@ -141,7 +159,8 @@ for patch in patches:
 result = validate_incremental(
     patch_dir="patches",
     early_stop_on_error=False,
-    max_concurrent=3
+    max_concurrent=3,
+    verbose=False
 )
 ```
 
